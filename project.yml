@@ -1,0 +1,89 @@
+name: Tockk
+options:
+  bundleIdPrefix: com.somee4
+  deploymentTarget:
+    macOS: "13.0"
+  createIntermediateGroups: true
+  developmentLanguage: en
+
+packages:
+  DynamicNotchKit:
+    url: https://github.com/MrKai77/DynamicNotchKit
+    from: 1.0.0
+
+targets:
+  Tockk:
+    type: application
+    platform: macOS
+    sources:
+      - path: Tockk
+        excludes:
+          - "**/CLAUDE.md"
+    resources:
+      - path: Tockk/Resources
+        optional: true
+    dependencies:
+      - package: DynamicNotchKit
+    postCompileScripts:
+      - name: Bundle tockk CLI
+        script: |
+          set -e
+          SRC="${SRCROOT}/cli/tockk"
+          DEST_DIR="${BUILT_PRODUCTS_DIR}/${UNLOCALIZED_RESOURCES_FOLDER_PATH}"
+          if [ -f "$SRC" ]; then
+            mkdir -p "$DEST_DIR"
+            cp "$SRC" "$DEST_DIR/tockk"
+            chmod +x "$DEST_DIR/tockk"
+          fi
+        inputFiles:
+          - "$(SRCROOT)/cli/tockk"
+        outputFiles:
+          - "$(BUILT_PRODUCTS_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/tockk"
+    info:
+      path: Tockk/Info.plist
+      properties:
+        LSUIElement: true
+        LSApplicationCategoryType: public.app-category.developer-tools
+        CFBundleShortVersionString: "0.1.0"
+        CFBundleVersion: "1"
+        NSHumanReadableCopyright: "Copyright © 2026 somee4. MIT License."
+        CFBundleLocalizations:
+          - en
+          - ko
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.somee4.tockk
+        MARKETING_VERSION: "0.1.0"
+        CURRENT_PROJECT_VERSION: "1"
+        SWIFT_VERSION: "5.9"
+        DEVELOPMENT_LANGUAGE: en
+        GENERATE_INFOPLIST_FILE: NO
+        ENABLE_HARDENED_RUNTIME: YES
+        CODE_SIGN_STYLE: Automatic
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+
+  TockkTests:
+    type: bundle.unit-test
+    platform: macOS
+    sources:
+      - path: TockkTests
+    dependencies:
+      - target: Tockk
+    settings:
+      base:
+        SWIFT_VERSION: "5.9"
+        GENERATE_INFOPLIST_FILE: YES
+
+schemes:
+  Tockk:
+    build:
+      targets:
+        Tockk: all
+        TockkTests: [test]
+    test:
+      targets:
+        - TockkTests
+    run:
+      config: Debug
+    archive:
+      config: Release

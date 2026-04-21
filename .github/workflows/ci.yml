@@ -1,0 +1,32 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build-and-test:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Select Xcode
+        run: sudo xcode-select -s /Applications/Xcode_15.4.app
+
+      - name: Install xcodegen
+        run: brew install xcodegen
+
+      - name: Generate Xcode project
+        run: xcodegen generate
+
+      - name: Build
+        run: xcodebuild -scheme Tockk -configuration Debug build
+
+      - name: Test
+        run: xcodebuild test -scheme Tockk -destination 'platform=macOS'
+
+      - name: Lint shell scripts
+        run: |
+          brew install shellcheck
+          shellcheck cli/tockk scripts/hooks/*.sh scripts/install-hooks.sh || true

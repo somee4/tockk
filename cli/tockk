@@ -1,0 +1,517 @@
+#!/usr/bin/env bash
+# tockk — send an event to the running Tockk app and configure hooks.
+#
+# USAGE
+#   tockk send --agent X --project Y --status success --title "Done" [--summary "..."] [--duration MS] [--cwd PATH]
+#   echo '{...}' | tockk send -
+#   tockk setup [--claude] [--codex] [--gemini]
+#
+# STATUS:  success | error | waiting | info   (default: success)
+# CWD:     default $PWD (basename becomes --project if --project not set)
+set -euo pipefail
+
+SOCKET="$HOME/Library/Application Support/Tockk/tockk.sock"
+
+# Resolve BASH_SOURCE through any number of symlinks so the script still
+# works when installed via `ln -s ... /usr/local/bin/tockk`.
+_src="${BASH_SOURCE[0]}"
+while [ -L "$_src" ]; do
+  _dir="$(cd -P "$(dirname "$_src")" && pwd)"
+  _src="$(readlink "$_src")"
+  [[ "$_src" != /* ]] && _src="$_dir/$_src"
+done
+SCRIPT_DIR="$(cd -P "$(dirname "$_src")" && pwd)"
+unset _src _dir
+
+# Resolve hook scripts. Precedence:
+#   1. $TOCKK_HOOKS_DIR          — explicit override (dev/testing).
+#   2. Installed app bundle      — `/Applications/Tockk.app/Contents/Resources`
+#                                  or `$HOME/Applications/Tockk.app/...`.
+#   3. Repo checkout             — `$SCRIPT_DIR/../scripts/hooks` (fallback
+#                                  for developer runs before the app ships).
+#
+# The user's expectation is that once the signed app is installed, hook
+# paths written into agent configs point to the bundled scripts — so
+# uninstalling the repo clone doesn't orphan their hooks.
+_tockk_hooks_dir=""
+if [[ -n "${TOCKK_HOOKS_DIR:-}" ]] && [[ -f "${TOCKK_HOOKS_DIR}/claude-stop.sh" ]]; then
+  _tockk_hooks_dir="$TOCKK_HOOKS_DIR"
+else
+  for _candidate in \
+    "/Applications/Tockk.app/Contents/Resources" \
+    "$HOME/Applications/Tockk.app/Contents/Resources"; do
+    if [[ -f "$_candidate/claude-stop.sh" ]]; then
+      _tockk_hooks_dir="$_candidate"
+      break
+    fi
+  done
+fi
+if [[ -z "$_tockk_hooks_dir" ]]; then
+  _tockk_hooks_dir="$SCRIPT_DIR/../scripts/hooks"
+fi
+
+CLAUDE_HOOK="$_tockk_hooks_dir/claude-stop.sh"
+CODEX_HOOK="$_tockk_hooks_dir/codex-notify.sh"
+GEMINI_HOOK="$_tockk_hooks_dir/gemini-stop.sh"
+unset _tockk_hooks_dir _candidate
+
+usage() {
+  # Writes to stdout so `tockk --help | less` works. Error paths redirect
+  # this to stderr at the call site ("usage >&2").
+  cat <<'EOF'
+usage: tockk send [flags]
+       tockk send -             (read JSON from stdin)
+       tockk setup [--claude] [--codex] [--gemini]
+
+flags:
+  --agent NAME            agent identifier (e.g. claude-code, codex)
+  --project NAME          project name (default: basename of --cwd)
+  --status STATUS         success | error | waiting | info (default: success)
+  --title "TEXT"          short headline (required unless reading stdin)
+  --summary "TEXT"        optional details
+  --duration MS           optional duration in milliseconds
+  --cwd PATH              optional working directory (default: $PWD)
+
+setup flags:
+  --claude                add Claude Code Stop hook to ~/.claude/settings.json
+  --codex                 add Codex CLI notifications command to ~/.codex/config.toml
+  --gemini                add Gemini CLI AfterAgent hook to ~/.gemini/settings.json
+EOF
+}
+
+setup_claude() {
+  python3 - "$HOME/.claude/settings.json" "$CLAUDE_HOOK" <<'PY'
+import json
+import os
+import pathlib
+import sys
+import tempfile
+
+config_path = pathlib.Path(sys.argv[1]).expanduser()
+hook_path = pathlib.Path(sys.argv[2]).resolve()
+command = f"/bin/bash {hook_path}"
+
+config_path.parent.mkdir(parents=True, exist_ok=True)
+
+if config_path.exists() and config_path.stat().st_size > 0:
+    with config_path.open() as fh:
+        try:
+            data = json.load(fh)
+        except json.JSONDecodeError as exc:
+            raise SystemExit(f"tockk: failed to parse {config_path}: {exc}")
+else:
+    data = {}
+
+hooks = data.setdefault("hooks", {})
+stop_hooks = hooks.setdefault("Stop", [])
+
+def _references_claude_stop(item):
+    if not isinstance(item, dict):
+        return False
+    cmd = item.get("command")
+    return isinstance(cmd, str) and "claude-stop.sh" in cmd
+
+# Purge legacy flat {"command": ...} entries — they are invalid per Claude Code's
+# hook schema and silently disable the Stop hook.
+stop_hooks[:] = [
+    item for item in stop_hooks
+    if not (isinstance(item, dict) and "hooks" not in item and _references_claude_stop(item))
+]
+
+def _contains_command(item):
+    if not isinstance(item, dict):
+        return False
+    nested = item.get("hooks")
+    if not isinstance(nested, list):
+        return False
+    return any(
+        isinstance(h, dict) and h.get("command") == command
+        for h in nested
+    )
+
+if not any(_contains_command(item) for item in stop_hooks):
+    stop_hooks.append({
+        "matcher": "*",
+        "hooks": [{"type": "command", "command": command}],
+    })
+
+# Atomic write — emit the new config to a sibling temp file then rename it
+# over the destination. Prevents a half-written settings.json if the process
+# is killed mid-write (Claude Code refuses to start with a corrupt config).
+fd, tmp_path = tempfile.mkstemp(
+    prefix=config_path.name + ".",
+    suffix=".tmp",
+    dir=str(config_path.parent),
+)
+try:
+    with os.fdopen(fd, "w") as fh:
+        json.dump(data, fh, ensure_ascii=False, indent=2, sort_keys=True)
+        fh.write("\n")
+    os.replace(tmp_path, config_path)
+except BaseException:
+    pathlib.Path(tmp_path).unlink(missing_ok=True)
+    raise
+PY
+  echo "tockk: Claude Code hook configured at ~/.claude/settings.json"
+}
+
+setup_codex() {
+  python3 - "$HOME/.codex/config.toml" "$CODEX_HOOK" <<'PY'
+import json
+import os
+import pathlib
+import re
+import sys
+import tempfile
+
+config_path = pathlib.Path(sys.argv[1]).expanduser()
+hook_path = pathlib.Path(sys.argv[2]).resolve()
+hook_path_literal = json.dumps(str(hook_path))
+default_notify = f'notify = ["/bin/bash", {hook_path_literal}]'
+
+config_path.parent.mkdir(parents=True, exist_ok=True)
+content = config_path.read_text() if config_path.exists() else ""
+
+def _is_inside_table_section(src: str, before_pos: int) -> bool:
+    """True when the most recent non-blank, non-comment line before
+    `before_pos` is a TOML table header `[...]` or `[[...]]`. We only want
+    to rewrite the *top-level* `notify` key — a `notify = "..."` nested
+    under e.g. `[mcp_servers.foo]` belongs to that table and must not be
+    overwritten.
+    """
+    for raw_line in reversed(src[:before_pos].splitlines()):
+        stripped = raw_line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        return stripped.startswith("[") and stripped.endswith("]")
+    return False
+
+def find_notify_assignment(src: str):
+    for assign in re.finditer(r"(?m)^[ \t]*notify[ \t]*=[ \t]*", src):
+        if _is_inside_table_section(src, assign.start()):
+            continue
+
+        line_start = src.rfind("\n", 0, assign.start()) + 1
+        value_start = assign.end()
+        while value_start < len(src) and src[value_start] in " \t":
+            value_start += 1
+        value_end = value_start
+
+        if value_start < len(src) and src[value_start] == "[":
+            depth = 1
+            value_end = value_start + 1
+            in_string = False
+            escaping = False
+            while value_end < len(src):
+                ch = src[value_end]
+                if in_string:
+                    if escaping:
+                        escaping = False
+                    elif ch == "\\":
+                        escaping = True
+                    elif ch == '"':
+                        in_string = False
+                else:
+                    if ch == '"':
+                        in_string = True
+                    elif ch == "[":
+                        depth += 1
+                    elif ch == "]":
+                        depth -= 1
+                        if depth == 0:
+                            value_end += 1
+                            break
+                value_end += 1
+            else:
+                line_end = src.find("\n", value_start)
+                if line_end == -1:
+                    line_end = len(src)
+                return (line_start, line_end, src[value_start:line_end].strip())
+        else:
+            line_end = src.find("\n", value_start)
+            if line_end == -1:
+                line_end = len(src)
+            value_end = line_end
+
+        line_end = src.find("\n", value_end)
+        if line_end == -1:
+            line_end = len(src)
+        return (line_start, line_end, src[value_start:value_end].strip())
+    return None
+
+assignment = find_notify_assignment(content)
+if assignment:
+    replace_start, replace_end, existing_notify = assignment
+    if str(hook_path) in existing_notify:
+        command_line = default_notify
+    else:
+        command_line = (
+            f'notify = ["/bin/bash", {hook_path_literal}, '
+            f'"--previous-notify", {json.dumps(existing_notify)}]'
+        )
+    tail = content[replace_end:]
+    # `replace_end` sits at the `\n` that terminated the old notify line
+    # (or at EOF). If we replaced at EOF, `tail` is empty and the joined
+    # content lacks a separator from whatever the trailing-newline
+    # normaliser appends — guarantee a `\n` so the new line never fuses
+    # with following content.
+    if not tail.startswith("\n"):
+        tail = "\n" + tail
+    content = content[:replace_start] + command_line + tail
+else:
+    command_line = default_notify
+    # Notify must live at the TOP LEVEL of the TOML. Appending at EOF
+    # places it inside whichever `[table]` section happens to be last,
+    # which silently re-binds the key (e.g. `mcp_servers.github.notify`)
+    # and Codex never invokes the hook. Insert it BEFORE the first table
+    # header instead; fall back to EOF only when the file has no tables.
+    lines = content.splitlines(keepends=True)
+    insert_idx = None
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        if stripped.startswith("[") and stripped.endswith("]"):
+            insert_idx = i
+            break
+    if insert_idx is None:
+        rstripped = content.rstrip()
+        prefix = (rstripped + "\n\n") if rstripped else ""
+        content = prefix + command_line + "\n"
+    else:
+        head = "".join(lines[:insert_idx]).rstrip()
+        rest = "".join(lines[insert_idx:])
+        prefix = (head + "\n\n") if head else ""
+        content = prefix + command_line + "\n\n" + rest
+
+content = re.sub(r"\n{3,}", "\n\n", content).strip() + "\n"
+
+# Belt-and-suspenders validation: if the rewrite produced invalid TOML,
+# abort rather than clobbering the user's working config.
+try:
+    import tomllib  # Python 3.11+
+    tomllib.loads(content)
+except ModuleNotFoundError:
+    pass  # Older Python — skip validation silently.
+except Exception as exc:
+    raise SystemExit(
+        f"tockk: refusing to write invalid TOML to {config_path}: {exc}"
+    )
+
+# Atomic write — Codex reads config.toml at startup and any partial write
+# would brick `codex` until the user fixes it manually.
+fd, tmp_path = tempfile.mkstemp(
+    prefix=config_path.name + ".",
+    suffix=".tmp",
+    dir=str(config_path.parent),
+)
+try:
+    with os.fdopen(fd, "w") as fh:
+        fh.write(content)
+    os.replace(tmp_path, config_path)
+except BaseException:
+    pathlib.Path(tmp_path).unlink(missing_ok=True)
+    raise
+PY
+  echo "tockk: Codex CLI notifications configured at ~/.codex/config.toml"
+}
+
+setup_gemini() {
+  python3 - "$HOME/.gemini/settings.json" "$GEMINI_HOOK" <<'PY'
+import json
+import os
+import pathlib
+import sys
+import tempfile
+
+config_path = pathlib.Path(sys.argv[1]).expanduser()
+hook_path = pathlib.Path(sys.argv[2]).resolve()
+command = f"/bin/bash {hook_path}"
+
+config_path.parent.mkdir(parents=True, exist_ok=True)
+
+if config_path.exists() and config_path.stat().st_size > 0:
+    with config_path.open() as fh:
+        try:
+            data = json.load(fh)
+        except json.JSONDecodeError as exc:
+            raise SystemExit(f"tockk: failed to parse {config_path}: {exc}")
+else:
+    data = {}
+
+hooks = data.setdefault("hooks", {})
+after_agent_hooks = hooks.setdefault("AfterAgent", [])
+
+
+def _contains_command(item):
+    if not isinstance(item, dict):
+        return False
+    nested = item.get("hooks")
+    if not isinstance(nested, list):
+        return False
+    return any(
+        isinstance(h, dict) and h.get("command") == command
+        for h in nested
+    )
+
+
+if not any(_contains_command(item) for item in after_agent_hooks):
+    after_agent_hooks.append({
+        "matcher": "*",
+        "hooks": [{"type": "command", "command": command}],
+    })
+
+fd, tmp_path = tempfile.mkstemp(
+    prefix=config_path.name + ".",
+    suffix=".tmp",
+    dir=str(config_path.parent),
+)
+try:
+    with os.fdopen(fd, "w") as fh:
+        json.dump(data, fh, ensure_ascii=False, indent=2, sort_keys=True)
+        fh.write("\n")
+    os.replace(tmp_path, config_path)
+except BaseException:
+    pathlib.Path(tmp_path).unlink(missing_ok=True)
+    raise
+PY
+  echo "tockk: Gemini CLI hook configured at ~/.gemini/settings.json"
+}
+
+setup_hooks() {
+  local configure_claude=0
+  local configure_codex=0
+  local configure_gemini=0
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --claude) configure_claude=1; shift ;;
+      --codex)  configure_codex=1; shift ;;
+      --gemini) configure_gemini=1; shift ;;
+      -h|--help) usage; exit 0 ;;
+      *) echo "tockk: unknown flag $1" >&2; usage >&2; exit 2 ;;
+    esac
+  done
+
+  if [[ $configure_claude -eq 0 && $configure_codex -eq 0 && $configure_gemini -eq 0 ]]; then
+    configure_claude=1
+    configure_codex=1
+    configure_gemini=1
+  fi
+
+  if [[ $configure_claude -eq 1 ]]; then
+    if [[ ! -f "$CLAUDE_HOOK" ]]; then
+      echo "tockk: missing Claude hook script at $CLAUDE_HOOK" >&2
+      exit 1
+    fi
+    setup_claude
+  fi
+
+  if [[ $configure_codex -eq 1 ]]; then
+    if [[ ! -f "$CODEX_HOOK" ]]; then
+      echo "tockk: missing Codex hook script at $CODEX_HOOK" >&2
+      exit 1
+    fi
+    setup_codex
+  fi
+
+  if [[ $configure_gemini -eq 1 ]]; then
+    if [[ ! -f "$GEMINI_HOOK" ]]; then
+      echo "tockk: missing Gemini hook script at $GEMINI_HOOK" >&2
+      exit 1
+    fi
+    setup_gemini
+  fi
+}
+
+send_event() {
+  local agent project status title summary duration cwd payload nc_err
+
+  if [[ ! -S "$SOCKET" ]]; then
+    echo "tockk: app not running or socket missing at $SOCKET" >&2
+    exit 1
+  fi
+
+  if [[ "${1:-}" == "-" ]]; then
+    payload="$(cat)"
+    # Validate stdin payload before sending — the socket server rejects
+    # malformed JSON silently, so a bad pipe would otherwise look like a
+    # successful send.
+    if [[ -z "${payload//[[:space:]]/}" ]]; then
+      echo "tockk: empty payload from stdin" >&2
+      exit 2
+    fi
+    if ! printf '%s' "$payload" | python3 -c \
+        'import json,sys; json.loads(sys.stdin.read())' 2>/dev/null; then
+      echo "tockk: stdin payload is not valid JSON" >&2
+      exit 2
+    fi
+  else
+    agent=""; project=""; status="success"; title=""
+    summary=""; duration=""; cwd="$PWD"
+    while [[ $# -gt 0 ]]; do
+      case "$1" in
+        --agent)    agent="$2";    shift 2 ;;
+        --project)  project="$2";  shift 2 ;;
+        --status)   status="$2";   shift 2 ;;
+        --title)    title="$2";    shift 2 ;;
+        --summary)  summary="$2";  shift 2 ;;
+        --duration) duration="$2"; shift 2 ;;
+        --cwd)      cwd="$2";      shift 2 ;;
+        -h|--help)  usage; exit 0 ;;
+        *) echo "tockk: unknown flag $1" >&2; usage >&2; exit 2 ;;
+      esac
+    done
+    if [[ -z "$title" ]]; then
+      echo "tockk: --title is required (or pipe JSON with 'tockk send -')" >&2
+      exit 2
+    fi
+    case "$status" in
+      success|error|waiting|info) ;;
+      *)
+        echo "tockk: --status must be one of success|error|waiting|info (got '$status')" >&2
+        exit 2
+        ;;
+    esac
+    if [[ -n "$duration" && ! "$duration" =~ ^[0-9]+$ ]]; then
+      echo "tockk: --duration must be a non-negative integer (ms), got '$duration'" >&2
+      exit 2
+    fi
+    if [[ -z "$project" ]]; then project="$(basename "$cwd")"; fi
+
+    payload=$(AGENT="$agent" PROJECT="$project" STATUS="$status" TITLE="$title" \
+              SUMMARY="$summary" DURATION="$duration" CWD="$cwd" \
+              python3 - <<'PY'
+import json, os
+# `agent` is a required field on the receiving side (Event.agent is
+# non-optional), so always include it — empty string is the contract for
+# "agent not declared", not a missing key.
+doc = {
+    "agent":   os.environ.get("AGENT", ""),
+    "project": os.environ["PROJECT"],
+    "status":  os.environ["STATUS"],
+    "title":   os.environ["TITLE"],
+    "cwd":     os.environ["CWD"],
+}
+if os.environ.get("SUMMARY"):  doc["summary"]    = os.environ["SUMMARY"]
+if os.environ.get("DURATION"): doc["durationMs"] = int(os.environ["DURATION"])
+print(json.dumps(doc, ensure_ascii=False))
+PY
+    )
+  fi
+
+  # Capture nc's stderr so a failed send surfaces a real reason ("Connection
+  # refused", "No such file or directory") instead of a generic message.
+  if ! nc_err="$(printf '%s\n' "$payload" | nc -U "$SOCKET" 2>&1 >/dev/null)"; then
+    echo "tockk: failed to send event${nc_err:+: $nc_err}" >&2
+    exit 1
+  fi
+}
+
+if [[ $# -lt 1 ]]; then usage >&2; exit 2; fi
+
+subcmd="$1"; shift
+case "$subcmd" in
+  send) send_event "$@" ;;
+  setup) setup_hooks "$@" ;;
+  -h|--help|help) usage; exit 0 ;;
+  *) usage >&2; exit 2 ;;
+esac
