@@ -7,7 +7,7 @@ Tockk is a macOS menu bar app that receives local agent events over a Unix socke
 
 **Apache 2.0** | **macOS 13+** | **Claude Code · Codex CLI · Gemini CLI**
 
-[한국어](./README.ko.md) · [Contributing](./CONTRIBUTING.md) · [Protocol](./docs/protocol.md) · [Install Guide](./docs/install.md)
+[한국어](./README.ko.md) · [Contributing](./CONTRIBUTING.md) · [Protocol](./docs/protocol.md)
 
 ---
 
@@ -22,24 +22,30 @@ Tockk receives completion events on `~/Library/Application Support/Tockk/tockk.s
 
 ---
 
-## Distribution
+## Install
 
-- `DMG`: the default path. Standard install flow for general users.
-- `Homebrew cask`: coming soon. Will target `brew install --cask tockk`.
+Requires macOS 13 Ventura or later.
 
----
+### Homebrew (recommended)
 
-## Install Today
+```bash
+brew install --cask somee4/tockk/tockk
+```
+
+Or tap first, then install:
+
+```bash
+brew tap somee4/tockk
+brew install --cask tockk
+```
+
+### DMG
 
 Grab the latest build from [GitHub Releases](https://github.com/somee4/tockk/releases).
 
 1. Download `Tockk.dmg` from the latest release
 2. Open the DMG and drag `Tockk.app` into `/Applications`
 3. Launch it once
-
-Requirements:
-
-- macOS 13 Ventura or later
 
 ---
 

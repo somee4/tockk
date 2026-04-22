@@ -10,13 +10,21 @@
 #
 # Optional environment variables:
 #   TOCKK_RELEASE_BASE_URL   Override the GitHub release download base URL.
+#   TOCKK_RELEASE_REPO       GitHub "owner/name" used for release upload (default: somee4/tockk).
 #   TOCKK_HOMEBREW_TAP_DIR   Copy the generated cask into <tap>/Casks/tockk.rb.
+#   TOCKK_TAP_AUTO_PUSH      Set to 1 to auto-commit and push the tap checkout.
+#   TOCKK_SKIP_PUBLISH       Set to 1 to skip GitHub release upload (cask uses LOCAL DMG sha).
 #   TOCKK_CODESIGN_IDENTITY  Developer ID Application identity for public distribution.
 #   TOCKK_NOTARYTOOL_PROFILE Keychain profile name created by `xcrun notarytool store-credentials`.
 #   TOCKK_NOTARY_APPLE_ID    Apple ID for notarization fallback.
 #   TOCKK_NOTARY_PASSWORD    App-specific password for notarization fallback.
 #   TOCKK_NOTARY_TEAM_ID     Apple Developer Team ID for notarization fallback.
 #   TOCKK_SKIP_DMG_STYLING   Set to 1 to skip Finder window styling (useful on CI/headless sessions).
+#
+# Default flow (recommended): the script uploads the DMG to GitHub Releases,
+# re-downloads it, and derives the cask sha256 from the REMOTE artifact. This
+# guarantees the tap cask always matches what users actually download. Set
+# TOCKK_SKIP_PUBLISH=1 to fall back to the old local-sha behaviour.
 #
 # Without a Developer ID identity this script falls back to a local-only,
 # ad-hoc-signed build. Public DMG/Homebrew distribution should use both
@@ -48,6 +56,11 @@ NOTARY_TEAM_ID="${TOCKK_NOTARY_TEAM_ID:-}"
 NOTARIZATION_ENABLED=0
 DMG_MOUNT_DIR=""
 DMG_DEVICE=""
+RELEASE_REPO="${TOCKK_RELEASE_REPO:-somee4/tockk}"
+SKIP_PUBLISH="${TOCKK_SKIP_PUBLISH:-0}"
+TAP_AUTO_PUSH="${TOCKK_TAP_AUTO_PUSH:-0}"
+PUBLISH_ENABLED=0
+CASK_SHA_SOURCE="local"
 
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
@@ -56,6 +69,55 @@ require_command() {
     echo "error: required command not found: $1" >&2
     exit 1
   fi
+}
+
+ensure_release() {
+  if gh release view "$RELEASE_TAG" --repo "$RELEASE_REPO" >/dev/null 2>&1; then
+    echo "==> Release ${RELEASE_TAG} already exists on ${RELEASE_REPO}"
+  else
+    echo "==> Creating release ${RELEASE_TAG} on ${RELEASE_REPO}"
+    gh release create "$RELEASE_TAG" \
+      --repo "$RELEASE_REPO" \
+      --title "$RELEASE_TAG" \
+      --notes "Release ${RELEASE_TAG}"
+  fi
+}
+
+upload_dmg_asset() {
+  echo "==> Uploading ${DMG_NAME} to ${RELEASE_TAG} (clobber)"
+  gh release upload "$RELEASE_TAG" "$DMG_PATH" \
+    --repo "$RELEASE_REPO" \
+    --clobber
+}
+
+fetch_remote_dmg_sha() {
+  local tmp
+  tmp="$(mktemp -d)"
+  gh release download "$RELEASE_TAG" \
+    --repo "$RELEASE_REPO" \
+    --pattern "$DMG_NAME" \
+    --dir "$tmp" \
+    --clobber >/dev/null
+  shasum -a 256 "${tmp}/${DMG_NAME}" | awk '{print $1}'
+  rm -rf "$tmp"
+}
+
+push_tap_checkout() {
+  local tap_dir="$1"
+  (
+    cd "$tap_dir"
+    if ! git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+      echo "warning: ${tap_dir} is not a git checkout; skipping auto-push" >&2
+      exit 0
+    fi
+    git add Casks/tockk.rb
+    if git diff --cached --quiet -- Casks/tockk.rb; then
+      echo "==> Tap cask unchanged; nothing to commit"
+    else
+      git commit -m "tockk ${VERSION}"
+      git push
+    fi
+  )
 }
 
 sign_path() {
@@ -313,15 +375,36 @@ if [[ -n "$CODESIGN_IDENTITY" ]]; then
   fi
 fi
 
-echo "==> Computing SHA256"
-DMG_SHA256="$(shasum -a 256 "$DMG_PATH" | awk '{print $1}')"
+echo "==> Computing local DMG SHA256 (informational)"
+LOCAL_DMG_SHA256="$(shasum -a 256 "$DMG_PATH" | awk '{print $1}')"
+echo "    local:  ${LOCAL_DMG_SHA256}"
 
-echo "==> Writing Homebrew cask"
+CASK_SHA256="$LOCAL_DMG_SHA256"
+
+if [[ "$SKIP_PUBLISH" == "1" ]]; then
+  echo "==> TOCKK_SKIP_PUBLISH=1; skipping GitHub release upload (cask will use local sha)"
+elif ! command -v gh >/dev/null 2>&1; then
+  echo "warning: 'gh' not found; skipping release upload (cask will use local sha)" >&2
+else
+  PUBLISH_ENABLED=1
+  ensure_release
+  upload_dmg_asset
+  echo "==> Fetching uploaded DMG to compute authoritative SHA256"
+  REMOTE_DMG_SHA256="$(fetch_remote_dmg_sha)"
+  echo "    remote: ${REMOTE_DMG_SHA256}"
+  if [[ "$REMOTE_DMG_SHA256" != "$LOCAL_DMG_SHA256" ]]; then
+    echo "warning: remote DMG sha differs from local; using REMOTE for cask (source of truth)" >&2
+  fi
+  CASK_SHA256="$REMOTE_DMG_SHA256"
+  CASK_SHA_SOURCE="remote"
+fi
+
+echo "==> Writing Homebrew cask (sha source: ${CASK_SHA_SOURCE})"
 mkdir -p "$HOMEBREW_DIR"
 cat >"$CASK_PATH" <<EOF
 cask "tockk" do
   version "${VERSION}"
-  sha256 "${DMG_SHA256}"
+  sha256 "${CASK_SHA256}"
 
   url "${DOWNLOAD_URL}",
       verified: "github.com/somee4/tockk/"
@@ -340,6 +423,11 @@ if [[ -n "${TOCKK_HOMEBREW_TAP_DIR:-}" ]]; then
   echo "==> Copying cask into tap checkout"
   mkdir -p "$TAP_CASKS_DIR"
   cp "$CASK_PATH" "${TAP_CASKS_DIR}/tockk.rb"
+
+  if [[ "$TAP_AUTO_PUSH" == "1" ]]; then
+    echo "==> Auto-committing tap cask"
+    push_tap_checkout "${TOCKK_HOMEBREW_TAP_DIR%/}"
+  fi
 fi
 
 echo "==> Cleaning staging directories"
@@ -358,6 +446,20 @@ if [[ -n "$CODESIGN_IDENTITY" ]]; then
 else
   echo "⚠️  Signing: local-only ad-hoc signature. Public DMG/Homebrew release should set TOCKK_CODESIGN_IDENTITY."
 fi
+if [[ "$PUBLISH_ENABLED" -eq 1 ]]; then
+  echo "✅ GitHub release: uploaded ${DMG_NAME} to ${RELEASE_REPO} ${RELEASE_TAG}"
+  echo "✅ Cask sha256 source: remote (matches published DMG)"
+else
+  echo "⚠️  GitHub release: skipped (cask sha is from LOCAL DMG; upload it manually, or unset TOCKK_SKIP_PUBLISH)"
+fi
+
 echo "Next:"
-echo "  1. Upload ${DMG_NAME} to GitHub Releases tag ${RELEASE_TAG}"
-echo "  2. Commit the generated cask into your tap repo or submit it to Homebrew"
+if [[ "$PUBLISH_ENABLED" -ne 1 ]]; then
+  echo "  1. Upload ${DMG_NAME} to GitHub Releases tag ${RELEASE_TAG}"
+  echo "  2. Re-derive cask sha256 from the uploaded DMG before publishing the tap"
+fi
+if [[ -z "${TOCKK_HOMEBREW_TAP_DIR:-}" ]]; then
+  echo "  • Set TOCKK_HOMEBREW_TAP_DIR (and optionally TOCKK_TAP_AUTO_PUSH=1) to update the tap automatically"
+elif [[ "$TAP_AUTO_PUSH" != "1" ]]; then
+  echo "  • Commit & push the cask inside ${TOCKK_HOMEBREW_TAP_DIR} (or set TOCKK_TAP_AUTO_PUSH=1)"
+fi

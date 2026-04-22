@@ -7,7 +7,7 @@ Tockk는 Unix 소켓으로 로컬 에이전트 이벤트를 받아 노치 스타
 
 **Apache 2.0** | **macOS 13+** | **Claude Code · Codex CLI · Gemini CLI**
 
-[English](./README.md) · [Contributing](./CONTRIBUTING.md) · [Protocol](./docs/protocol.md) · [설치 가이드](./docs/install.md)
+[English](./README.md) · [Contributing](./CONTRIBUTING.md) · [Protocol](./docs/protocol.md)
 
 ---
 
@@ -22,24 +22,30 @@ Tockk는 작업 완료 이벤트를 `~/Library/Application Support/Tockk/tockk.s
 
 ---
 
-## Distribution
+## 설치
 
-- `DMG`: 기본 설치 경로. 일반 사용자 기준의 표준 설치 방식입니다.
-- `Homebrew cask`: 준비 중. `brew install --cask tockk`를 목표로 합니다.
+macOS 13 Ventura 이상 필요.
 
----
+### Homebrew (권장)
 
-## Install Today
+```bash
+brew install --cask somee4/tockk/tockk
+```
+
+또는 tap을 먼저 추가한 뒤 설치:
+
+```bash
+brew tap somee4/tockk
+brew install --cask tockk
+```
+
+### DMG
 
 [GitHub Releases](https://github.com/somee4/tockk/releases)에서 최신 빌드를 받으세요.
 
 1. 최신 릴리스에서 `Tockk.dmg` 다운로드
 2. DMG를 열고 `Tockk.app`을 `/Applications`로 드래그
 3. 첫 실행
-
-요구사항:
-
-- macOS 13 Ventura 이상
 
 ---
 
