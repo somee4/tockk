@@ -194,8 +194,7 @@ struct ExpandedNotchView: View {
                     status: .success,
                     title: "Build complete",
                     summary: "56 tests, 0 failures",
-                    durationMs: 3_200,
-                    cwd: "/Users/yonghui/yonProject/site"
+                    durationMs: 3_200
                 ),
                 theme: AppTheme(preset: preset),
                 onClose: {}

@@ -6,37 +6,35 @@ Protocol version: **v1**
 
 ## Transport
 
-Tockk는 Unix 도메인 소켓으로 이벤트를 수신합니다.
+Tockk receives events over a Unix domain socket.
 
 | Property | Value |
 |----------|-------|
 | Socket path | `~/Library/Application Support/Tockk/tockk.sock` |
-| Permissions | `0600` (소유자 전용 — 다른 사용자 프로세스는 접근 불가) |
-| Framing | Newline-delimited JSON (각 이벤트는 `\n` 으로 끝남) |
+| Permissions | `0600` (owner-only — other user processes cannot access it) |
+| Framing | Newline-delimited JSON (each event ends with `\n`) |
 | Encoding | UTF-8 |
 
-소켓 파일은 Tockk 앱이 실행될 때 생성되고, 앱이 종료되면 제거됩니다.  
-앱이 실행 중이지 않으면 소켓 파일이 없으므로 연결 시도가 실패합니다.
+The socket file is created when the Tockk app launches and removed when it exits.
+If the app is not running, the socket file does not exist and connection attempts will fail.
 
 ---
 
 ## Event Schema
 
-각 이벤트는 하나의 JSON 오브젝트를 담은 단일 줄(line)입니다.
+Each event is a single line containing one JSON object.
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `agent` | string | **Required** | 이벤트를 생성한 에이전트 이름 (예: `"claude"`, `"codex"`, `"custom"`) |
-| `project` | string | **Required** | 작업 중인 프로젝트 또는 디렉터리 이름 |
-| `status` | string | **Required** | 이벤트 상태 — 아래 Status Values 표 참조 |
-| `title` | string | **Required** | 노치에 표시할 짧은 제목 (권장 40자 이하) |
-| `summary` | string | Optional | 부제목 — 상세 정보 (예: 변경된 파일 수) |
-| `durationMs` | number | Optional | 작업 소요 시간(밀리초). 표시용 메타 정보 |
-| `cwd` | string | Optional | 작업 디렉터리 경로. 확장 뷰의 `열기` 동작에 사용 |
-| `sourceAppBundleId` | string | Optional | 작업을 시작한 앱의 번들 ID. 있으면 Finder 대신 해당 앱으로 복귀 시도 |
-| `timestamp` | string | Optional | ISO 8601 시각. 생략하면 수신 시각으로 채움 |
+| `agent` | string | **Required** | Name of the agent that produced the event (e.g. `"claude"`, `"codex"`, `"custom"`) |
+| `project` | string | **Required** | Project or directory name the work belongs to |
+| `status` | string | **Required** | Event status — see the Status Values table below |
+| `title` | string | **Required** | Short title shown in the notch (40 chars or fewer recommended) |
+| `summary` | string | Optional | Subtitle with extra detail (e.g. number of files changed) |
+| `durationMs` | number | Optional | Elapsed time in milliseconds. Metadata for display |
+| `timestamp` | string | Optional | ISO 8601 timestamp. Filled with the receive time if omitted |
 
-알 수 없는 필드는 무시됩니다. `id`는 앱이 내부적으로 채우므로 외부 클라이언트가 보낼 필요가 없습니다.
+Unknown fields are ignored. `id` is populated internally by the app, so external clients do not need to send it.
 
 ---
 
@@ -44,12 +42,12 @@ Tockk는 Unix 도메인 소켓으로 이벤트를 수신합니다.
 
 | Status | Meaning | Default Icon |
 |--------|---------|--------------|
-| `success` | 작업이 성공적으로 완료됨 | ✅ |
-| `error` | 작업 중 오류 발생 | ❌ |
-| `waiting` | 에이전트가 사용자 입력 대기 중 | ⏳ |
-| `info` | 일반 정보성 알림 | ℹ️ |
+| `success` | Work completed successfully | ✅ |
+| `error` | An error occurred during the work | ❌ |
+| `waiting` | Agent is waiting for user input | ⏳ |
+| `info` | General informational notice | ℹ️ |
 
-알 수 없는 status 값은 `info`로 폴백 처리됩니다.
+Unknown status values fall back to `info`.
 
 ---
 
@@ -58,7 +56,7 @@ Tockk는 Unix 도메인 소켓으로 이벤트를 수신합니다.
 ### success
 
 ```json
-{"agent":"claude","project":"myapp","status":"success","title":"Task complete","summary":"3 files changed","durationMs":134000,"cwd":"/Users/me/myapp"}
+{"agent":"claude","project":"myapp","status":"success","title":"Task complete","summary":"3 files changed","durationMs":134000}
 ```
 
 ### error
@@ -85,14 +83,14 @@ Tockk는 Unix 도메인 소켓으로 이벤트를 수신합니다.
 
 | Situation | Behavior |
 |-----------|----------|
-| JSON 파싱 실패 (malformed) | 이벤트 무시, 소켓 연결 유지 |
-| 필수 필드 누락 | 이벤트 무시 |
-| 앱 미실행 (소켓 없음) | 클라이언트에서 연결 오류 발생 — Tockk를 먼저 실행하세요 |
-| 연결 후 즉시 닫힘 | 정상 — Tockk는 각 이벤트 수신 후 연결을 닫습니다 |
-| 소켓 타임아웃 | 없음 — 전송 후 바로 연결을 닫으면 됩니다 |
+| JSON parse failure (malformed) | Event is dropped, socket connection is kept alive |
+| Required field missing | Event is dropped |
+| App not running (no socket) | Client gets a connection error — start Tockk first |
+| Connection closed right after send | Expected — Tockk closes the connection after each event |
+| Socket timeout | None — clients can close the connection immediately after sending |
 
-클라이언트는 이벤트를 전송한 뒤 소켓 연결을 닫으면 됩니다.  
-응답 데이터를 기다릴 필요가 없습니다 (fire-and-forget).
+Clients may close the socket as soon as the event has been sent.
+There is no response to wait for (fire-and-forget).
 
 ---
 
@@ -105,13 +103,13 @@ Tockk는 Unix 도메인 소켓으로 이벤트를 수신합니다.
 SOCK=~/Library/Application\ Support/Tockk/tockk.sock
 
 send_tockk() {
-  local agent="$1" project="$2" status="$3" title="$4" cwd="${5:-$PWD}"
-  printf '{"agent":"%s","project":"%s","status":"%s","title":"%s","cwd":"%s"}\n' \
-    "$agent" "$project" "$status" "$title" "$cwd" \
+  local agent="$1" project="$2" status="$3" title="$4" summary="${5:-}"
+  printf '{"agent":"%s","project":"%s","status":"%s","title":"%s","summary":"%s"}\n' \
+    "$agent" "$project" "$status" "$title" "$summary" \
     | nc -U "$SOCK"
 }
 
-send_tockk "mytool" "demo" "success" "Done"
+send_tockk "mytool" "demo" "success" "Done" "all green"
 ```
 
 ### Python
@@ -127,7 +125,7 @@ def send_tockk(
     status: str,
     title: str,
     summary: str = "",
-    cwd: str = "",
+    duration_ms: int | None = None,
 ) -> None:
     sock_path = os.path.expanduser(
         "~/Library/Application Support/Tockk/tockk.sock"
@@ -135,8 +133,8 @@ def send_tockk(
     payload = {"agent": agent, "project": project, "status": status, "title": title}
     if summary:
         payload["summary"] = summary
-    if cwd:
-        payload["cwd"] = cwd
+    if duration_ms is not None:
+        payload["durationMs"] = duration_ms
 
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
         s.connect(sock_path)
@@ -148,7 +146,7 @@ send_tockk(
     "success",
     "ETL complete",
     "10k rows processed",
-    os.getcwd(),
+    duration_ms=42000,
 )
 ```
 
@@ -159,12 +157,12 @@ const net = require('net');
 const os = require('os');
 const path = require('path');
 
-function sendTockk({ agent, project, status, title, summary, cwd } = {}) {
+function sendTockk({ agent, project, status, title, summary, durationMs } = {}) {
   const sockPath = path.join(
     os.homedir(),
     'Library/Application Support/Tockk/tockk.sock'
   );
-  const payload = JSON.stringify({ agent, project, status, title, summary, cwd }) + '\n';
+  const payload = JSON.stringify({ agent, project, status, title, summary, durationMs }) + '\n';
   const client = net.createConnection(sockPath, () => {
     client.write(payload);
     client.end();
@@ -177,7 +175,7 @@ sendTockk({
   project: 'myapp',
   status: 'success',
   title: 'Build done',
-  cwd: process.cwd(),
+  durationMs: 18000,
 });
 ```
 
@@ -192,17 +190,17 @@ printf '{"agent":"test","project":"demo","status":"success","title":"hello"}\n' 
 
 ## Version Compatibility
 
-현재 버전: **Protocol v1**
+Current version: **Protocol v1**
 
-v1은 additive-only 정책을 따릅니다:
-- 필드 추가는 하위 호환 변경으로 간주합니다.
-- 기존 필드의 제거 또는 타입 변경 시 major 버전이 증가합니다.
-- 알 수 없는 필드는 무시됩니다 — 미래 클라이언트가 새 필드를 보내도 현재 앱은 정상 동작합니다.
+v1 follows an additive-only policy:
+- Adding fields is considered a backward-compatible change.
+- Removing existing fields or changing their types bumps the major version.
+- Unknown fields are ignored — future clients can send new fields and the current app will keep working.
 
 ## CLI Shortcut
 
-번들된 CLI를 쓰면 JSON을 직접 만들지 않고도 같은 이벤트를 보낼 수 있습니다.
+With the bundled CLI you can send the same events without crafting JSON yourself.
 
 ```bash
-tockk send --agent codex --status success --title "Build done" --duration 134000 --cwd "$PWD"
+tockk send --agent codex --status success --title "Build done" --duration 134000
 ```

@@ -32,18 +32,12 @@ if [[ -n "$TOCKK_CLAUDE_DEBUG_LOG" ]]; then
   mkdir -p "$(dirname "$TOCKK_CLAUDE_DEBUG_LOG")" 2>/dev/null || true
   {
     printf '=== %s pid=%s ===\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$$"
-    printf 'cwd: %s\nsource_app: %s\n' "$CWD" "${__CFBundleIdentifier:-}"
+    printf 'cwd: %s\n' "$CWD"
     printf 'stdin: %s\n\n' "$STDIN_JSON"
   } >>"$TOCKK_CLAUDE_DEBUG_LOG" 2>/dev/null || true
 fi
 
-# Bundle ID of the app that launched the agent process (Terminal, iTerm2,
-# VS Code, Cursor, Warp, Ghostty, …). macOS sets __CFBundleIdentifier on
-# every process launched by LaunchServices; it propagates through child
-# processes, so the hook sees whichever app is "above" claude-code.
-SOURCE_APP_BUNDLE_ID="${__CFBundleIdentifier:-}"
-
-export CWD STDIN_JSON SOURCE_APP_BUNDLE_ID
+export CWD STDIN_JSON
 
 # IMPORTANT: do NOT wrap this heredoc in $(...). Bash's command-substitution
 # parser still interprets backticks inside a single-quoted heredoc body,
@@ -234,16 +228,11 @@ doc = {
     "project": os.path.basename(cwd) or "claude-code",
     "status": "success",
     "title": title,
-    "cwd": cwd,
 }
 if title_detail_summary:
     doc["summary"] = title_detail_summary
 if duration_ms is not None:
     doc["durationMs"] = duration_ms
-
-source_app = os.environ.get("SOURCE_APP_BUNDLE_ID", "").strip()
-if source_app:
-    doc["sourceAppBundleId"] = source_app
 
 print(json.dumps(doc, ensure_ascii=False))
 PY

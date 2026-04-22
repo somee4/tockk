@@ -63,12 +63,11 @@
 │  ───────────────────────────────────    │
 │  3 files changed, all tests passing     │
 │  마지막 커밋: feat(content): add lang.. │
-│  [열기]  [닫기]                         │
+│                               [닫기]    │
 └─────────────────────────────────────────┘
 ```
 
 - 클릭으로 확장/축소 토글.
-- "열기" 버튼: `cwd` URL scheme으로 Finder/편집기 열기.
 
 ### 큐 동작
 
@@ -103,7 +102,6 @@
   "title": "빌드 완료",
   "summary": "3 files changed, all tests passing",
   "durationMs": 134000,
-  "cwd": "/Users/yonghui/yonProject/site",
   "timestamp": "2026-04-20T10:30:00Z"
 }
 ```
@@ -116,7 +114,6 @@
 | `title` | ✅ | 한 줄 요약 (최대 80자) |
 | `summary` | | 상세 내용 (최대 500자) |
 | `durationMs` | | 작업 소요 시간 |
-| `cwd` | | 작업 디렉토리 (확장 뷰의 "열기" 버튼용) |
 | `timestamp` | | ISO 8601 |
 
 ### CLI

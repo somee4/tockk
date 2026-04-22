@@ -11,7 +11,6 @@ final class EventTests: XCTestCase {
           "title": "Build complete",
           "summary": "3 files changed",
           "durationMs": 134000,
-          "cwd": "/Users/x/site",
           "timestamp": "2026-04-20T10:30:00Z"
         }
         """.data(using: .utf8)!

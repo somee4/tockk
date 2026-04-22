@@ -12,11 +12,6 @@ struct Event: Codable, Identifiable {
     let title: String
     let summary: String?
     let durationMs: Int?
-    let cwd: String?
-    /// Bundle identifier of the app that launched the agent (e.g.
-    /// `com.apple.Terminal`, `com.microsoft.VSCode`). Currently stored
-    /// for protocol compatibility with hook scripts; not consumed by the UI.
-    let sourceAppBundleId: String?
     let timestamp: Date
 
     init(
@@ -27,8 +22,6 @@ struct Event: Codable, Identifiable {
         title: String,
         summary: String? = nil,
         durationMs: Int? = nil,
-        cwd: String? = nil,
-        sourceAppBundleId: String? = nil,
         timestamp: Date = Date()
     ) {
         self.id = id
@@ -38,8 +31,6 @@ struct Event: Codable, Identifiable {
         self.title = title
         self.summary = summary
         self.durationMs = durationMs
-        self.cwd = cwd
-        self.sourceAppBundleId = sourceAppBundleId
         self.timestamp = timestamp
     }
 
@@ -52,8 +43,6 @@ struct Event: Codable, Identifiable {
         self.title = try c.decode(String.self, forKey: .title)
         self.summary = try c.decodeIfPresent(String.self, forKey: .summary)
         self.durationMs = try c.decodeIfPresent(Int.self, forKey: .durationMs)
-        self.cwd = try c.decodeIfPresent(String.self, forKey: .cwd)
-        self.sourceAppBundleId = try c.decodeIfPresent(String.self, forKey: .sourceAppBundleId)
         self.timestamp = try c.decodeIfPresent(Date.self, forKey: .timestamp) ?? Date()
     }
 }

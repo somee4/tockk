@@ -18,7 +18,6 @@ set -euo pipefail
 
 CWD="${CODEX_CWD:-$PWD}"
 SOCKET="${HOME}/Library/Application Support/Tockk/tockk.sock"
-SOURCE_APP_BUNDLE_ID="${__CFBundleIdentifier:-}"
 
 previous_notify=""
 while [[ $# -gt 0 ]]; do
@@ -58,7 +57,7 @@ if [[ ! -S "$SOCKET" ]]; then
   # Socket missing — skip Tockk emit but still chain previous_notify below.
   :
 else
-  PAYLOAD="$payload" CWD="$CWD" SOURCE_APP_BUNDLE_ID="$SOURCE_APP_BUNDLE_ID" \
+  PAYLOAD="$payload" CWD="$CWD" \
     python3 <<'PY' | nc -U "$SOCKET" >/dev/null 2>&1 || true
 import json
 import os
@@ -116,14 +115,9 @@ doc = {
     "project": os.path.basename(cwd) or "codex",
     "status": "success",
     "title": title,
-    "cwd": cwd,
 }
 if summary:
     doc["summary"] = summary
-
-source_app = os.environ.get("SOURCE_APP_BUNDLE_ID", "").strip()
-if source_app:
-    doc["sourceAppBundleId"] = source_app
 
 print(json.dumps(doc, ensure_ascii=False))
 PY

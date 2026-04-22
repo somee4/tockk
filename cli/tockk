@@ -2,12 +2,12 @@
 # tockk — send an event to the running Tockk app and configure hooks.
 #
 # USAGE
-#   tockk send --agent X --project Y --status success --title "Done" [--summary "..."] [--duration MS] [--cwd PATH]
+#   tockk send --agent X --project Y --status success --title "Done" [--summary "..."] [--duration MS]
 #   echo '{...}' | tockk send -
 #   tockk setup [--claude] [--codex] [--gemini]
 #
 # STATUS:  success | error | waiting | info   (default: success)
-# CWD:     default $PWD (basename becomes --project if --project not set)
+# PROJECT: default basename of $PWD
 set -euo pipefail
 
 SOCKET="$HOME/Library/Application Support/Tockk/tockk.sock"
@@ -65,12 +65,11 @@ usage: tockk send [flags]
 
 flags:
   --agent NAME            agent identifier (e.g. claude-code, codex)
-  --project NAME          project name (default: basename of --cwd)
+  --project NAME          project name (default: basename of $PWD)
   --status STATUS         success | error | waiting | info (default: success)
   --title "TEXT"          short headline (required unless reading stdin)
   --summary "TEXT"        optional details
   --duration MS           optional duration in milliseconds
-  --cwd PATH              optional working directory (default: $PWD)
 
 setup flags:
   --claude                add Claude Code Stop hook to ~/.claude/settings.json
@@ -423,7 +422,7 @@ setup_hooks() {
 }
 
 send_event() {
-  local agent project status title summary duration cwd payload nc_err
+  local agent project status title summary duration payload nc_err
 
   if [[ ! -S "$SOCKET" ]]; then
     echo "tockk: app not running or socket missing at $SOCKET" >&2
@@ -446,7 +445,7 @@ send_event() {
     fi
   else
     agent=""; project=""; status="success"; title=""
-    summary=""; duration=""; cwd="$PWD"
+    summary=""; duration=""
     while [[ $# -gt 0 ]]; do
       case "$1" in
         --agent)    agent="$2";    shift 2 ;;
@@ -455,7 +454,6 @@ send_event() {
         --title)    title="$2";    shift 2 ;;
         --summary)  summary="$2";  shift 2 ;;
         --duration) duration="$2"; shift 2 ;;
-        --cwd)      cwd="$2";      shift 2 ;;
         -h|--help)  usage; exit 0 ;;
         *) echo "tockk: unknown flag $1" >&2; usage >&2; exit 2 ;;
       esac
@@ -475,10 +473,10 @@ send_event() {
       echo "tockk: --duration must be a non-negative integer (ms), got '$duration'" >&2
       exit 2
     fi
-    if [[ -z "$project" ]]; then project="$(basename "$cwd")"; fi
+    if [[ -z "$project" ]]; then project="$(basename "$PWD")"; fi
 
     payload=$(AGENT="$agent" PROJECT="$project" STATUS="$status" TITLE="$title" \
-              SUMMARY="$summary" DURATION="$duration" CWD="$cwd" \
+              SUMMARY="$summary" DURATION="$duration" \
               python3 - <<'PY'
 import json, os
 # `agent` is a required field on the receiving side (Event.agent is
@@ -489,7 +487,6 @@ doc = {
     "project": os.environ["PROJECT"],
     "status":  os.environ["STATUS"],
     "title":   os.environ["TITLE"],
-    "cwd":     os.environ["CWD"],
 }
 if os.environ.get("SUMMARY"):  doc["summary"]    = os.environ["SUMMARY"]
 if os.environ.get("DURATION"): doc["durationMs"] = int(os.environ["DURATION"])

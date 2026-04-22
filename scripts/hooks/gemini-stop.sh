@@ -29,9 +29,8 @@ SOCKET="${HOME}/Library/Application Support/Tockk/tockk.sock"
 if [[ ! -S "$SOCKET" ]]; then exit 0; fi
 
 STDIN_JSON="$(cat || true)"
-SOURCE_APP_BUNDLE_ID="${__CFBundleIdentifier:-}"
 
-export CWD STDIN_JSON SOURCE_APP_BUNDLE_ID
+export CWD STDIN_JSON
 
 # Gemini's AfterAgent fires recursively if our script rewrites the transcript;
 # stop_hook_active=true signals we're inside a re-entry and must exit cleanly.
@@ -126,14 +125,9 @@ doc = {
     "project": os.path.basename(cwd) or "gemini-cli",
     "status": "success",
     "title": title,
-    "cwd": cwd,
 }
 if title_detail_summary:
     doc["summary"] = title_detail_summary
-
-source_app = os.environ.get("SOURCE_APP_BUNDLE_ID", "").strip()
-if source_app:
-    doc["sourceAppBundleId"] = source_app
 
 print(json.dumps(doc, ensure_ascii=False))
 PY
