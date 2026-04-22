@@ -24,237 +24,78 @@ Tockk receives completion events on `~/Library/Application Support/Tockk/tockk.s
 
 ## Distribution
 
-Two distribution targets are planned.
-
 - `DMG`: the default path. Standard install flow for general users.
-- `Homebrew cask`: the developer-friendly path. Targets `brew install --cask tockk`.
-
-The release script in this repo prepares both the `DMG` and the Homebrew cask artifact together. Public distribution still requires a GitHub Releases upload and, if desired, publishing to a dedicated tap.
+- `Homebrew cask`: coming soon. Will target `brew install --cask tockk`.
 
 ---
 
 ## Install Today
 
-Until public install packages land, running from source is the most reliable path.
+Grab the latest build from [GitHub Releases](https://github.com/somee4/tockk/releases).
 
-```bash
-git clone https://github.com/somee4/tockk.git
-cd tockk
-
-brew install xcodegen
-xcodegen generate
-open Tockk.xcodeproj
-```
-
-Run the `Tockk` scheme from Xcode, or build from the terminal:
-
-```bash
-xcodebuild -scheme Tockk -configuration Debug build
-```
+1. Download `Tockk.dmg` from the latest release
+2. Open the DMG and drag `Tockk.app` into `/Applications`
+3. Launch it once
 
 Requirements:
 
 - macOS 13 Ventura or later
-- Xcode 15+
-
----
-
-## Release Plan
-
-Once releases are cut, only two install paths will remain.
-
-### 1. DMG
-
-The default path.
-
-1. Download `Tockk.dmg`
-2. Drag `Tockk.app` into `/Applications`
-3. Launch it once
-
-### 2. Homebrew
-
-The developer path.
-
-```bash
-brew install --cask tockk
-```
-
-Maintainers can produce both artifacts with the release script:
-
-```bash
-./scripts/release.sh 0.1.0
-```
-
-Outputs:
-
-- `build/Tockk-0.1.0.dmg`
-- `build/homebrew/tockk.rb`
-
-To generate a styled install-style DMG (with app icon dragged onto Applications in Finder), run the script inside a logged-in macOS session. In CI or headless sessions, fall back to a default-layout DMG with `TOCKK_SKIP_DMG_STYLING=1 ./scripts/release.sh 0.1.0`.
-
-You can pass `TOCKK_HOMEBREW_TAP_DIR=/path/to/homebrew-tap` to have the cask file copied straight into a tap checkout.
-
-Recommended environment for public distribution:
-
-```bash
-export TOCKK_CODESIGN_IDENTITY="Developer ID Application: Your Name (TEAMID)"
-export TOCKK_NOTARYTOOL_PROFILE="tockk-notary"
-./scripts/release.sh 0.1.0
-```
-
-Instead of `TOCKK_NOTARYTOOL_PROFILE`, you may pass these three directly:
-
-```bash
-export TOCKK_NOTARY_APPLE_ID="you@example.com"
-export TOCKK_NOTARY_PASSWORD="app-specific-password"
-export TOCKK_NOTARY_TEAM_ID="TEAMID"
-```
-
-Storing notarytool credentials once is usually easier:
-
-```bash
-xcrun notarytool store-credentials "tockk-notary" \
-  --apple-id "you@example.com" \
-  --team-id "TEAMID"
-```
 
 ---
 
 ## Quick Start
 
-Launch the app and an icon appears in the menu bar.
+Launch Tockk and its icon appears in the menu bar.
 
-You can verify the install with a test event:
+Fire a sample event to confirm the notch notification animates in:
 
 ```bash
-printf '{"agent":"test","project":"demo","status":"success","title":"hello"}\n' | \
-  nc -U ~/Library/Application\ Support/Tockk/tockk.sock
+tockk send \
+  --agent claude \
+  --project tockk \
+  --status success \
+  --title "Build passed" \
+  --summary "42 tests, 0 failures — 12.3s" \
+  --duration 12300
 ```
 
-If everything is wired up, a notification animates in the notch area.
+Or pipe a raw JSON payload straight into the socket:
+
+```bash
+printf '{"agent":"codex","project":"my-app","status":"error","title":"Type check failed","summary":"3 errors in src/api.ts"}\n' | \
+  nc -U ~/Library/Application\ Support/Tockk/tockk.sock
+```
 
 ---
 
 ## Hook Setup
 
-The easiest path today is to use the scripts bundled with the repository.
+Tockk configures agent hooks for you — no manual JSON editing required.
 
-Configure all three integrations in one command:
+### From the app
 
-```bash
-./scripts/install-hooks.sh
-```
+Open `Tockk → Settings → Integrations` and toggle each agent on. Tockk writes the hook entry into the matching config file and keeps the path pointing at the bundled scripts inside `Tockk.app`.
 
-Or drive it from the CLI directly:
+### From the CLI
 
-```bash
-./cli/tockk setup                 # all supported agents
-./cli/tockk setup --claude        # Claude Code only
-./cli/tockk setup --codex         # Codex CLI only
-./cli/tockk setup --gemini        # Gemini CLI only
-```
-
-### Claude Code
-
-Adds a `Stop` hook to `~/.claude/settings.json`.
-
-```json
-{
-  "hooks": {
-    "Stop": [
-      {
-        "matcher": "*",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "/bin/bash /absolute/path/to/tockk/scripts/hooks/claude-stop.sh"
-          }
-        ]
-      }
-    ]
-  }
-}
-```
-
-### Codex CLI
-
-Adds a top-level `notify` entry to `~/.codex/config.toml`.
-
-```toml
-notify = ["/bin/bash", "/absolute/path/to/tockk/scripts/hooks/codex-notify.sh"]
-```
-
-### Gemini CLI
-
-Adds an `AfterAgent` hook to `~/.gemini/settings.json`.
-
-```json
-{
-  "hooks": {
-    "AfterAgent": [
-      {
-        "matcher": "*",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "/bin/bash /absolute/path/to/tockk/scripts/hooks/gemini-stop.sh"
-          }
-        ]
-      }
-    ]
-  }
-}
-```
-
-### Other Tools
-
-Any tool that can send a JSON event to the Unix socket can integrate with Tockk.
+The bundled `tockk` CLI does the same thing from your shell:
 
 ```bash
-printf '{"agent":"mytool","project":"demo","status":"success","title":"Done"}\n' | \
-  nc -U ~/Library/Application\ Support/Tockk/tockk.sock
+tockk setup                 # configure Claude Code, Codex CLI, and Gemini CLI
+tockk setup --claude        # Claude Code only
+tockk setup --codex         # Codex CLI only
+tockk setup --gemini        # Gemini CLI only
 ```
 
-Using the bundled CLI:
+### Other tools
+
+Any tool that can send a JSON line to the Unix socket works with Tockk:
 
 ```bash
-./cli/tockk send --agent mytool --project demo --status success --title "Done"
+tockk send --agent mytool --project demo --status success --title "Done"
 ```
 
 See [docs/protocol.md](./docs/protocol.md) for the event schema and field definitions.
-
----
-
-## What Tockk Shows
-
-- Compact notch notification
-- Expanded notification view
-- Recent events in the menu bar
-- Per-app theme presets in Settings
-
-Current theme presets:
-
-- `Practical Utility`
-- `Developer Tool`
-- `Small Product`
-
----
-
-## Development
-
-Tests:
-
-```bash
-xcodebuild test -scheme Tockk -destination 'platform=macOS'
-```
-
-Shell script linting:
-
-```bash
-shellcheck cli/tockk scripts/hooks/*.sh scripts/install-hooks.sh
-```
-
-The release packaging script lives at [`scripts/release.sh`](./scripts/release.sh). It produces a `DMG + Homebrew cask`, and will code-sign and notarize the build when `TOCKK_CODESIGN_IDENTITY` and notarization credentials are provided.
 
 ---
 
