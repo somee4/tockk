@@ -47,6 +47,14 @@ final class NotchPresenter {
         showTask?.cancel()
         notch = nil
 
+        // `style: .auto`는 MacBook 내장 디스플레이처럼 safeAreaInsets.top이
+        // 있는 화면에서만 `.notch`로 떨어지고, 외장 모니터에선 `.floating`
+        // 이 된다. `notchTopInset`은 NotchShape의 상단 곡선에 arrivalEffect
+        // pulse shadow가 걸리는 걸 피하려고 넣은 보정이라 floating 스타일
+        // 에선 필요없고, 오히려 pill을 아래로 밀어 어색해 보인다.
+        let targetScreen = screen ?? NSScreen.screens.first
+        let isNotchStyle = (targetScreen?.safeAreaInsets.top ?? 0) > 0
+
         let contentView = NotchContent(
             event: event,
             pendingCount: pendingCount,
@@ -55,6 +63,7 @@ final class NotchPresenter {
             residenceSeconds: residenceSeconds,
             reduceMotion: reduceMotion,
             defaultExpansion: defaultExpansion,
+            isNotchStyle: isNotchStyle,
             onClose: onClose
         )
 
@@ -132,6 +141,7 @@ private struct NotchContent: View {
     let residenceSeconds: TimeInterval
     let reduceMotion: Bool
     let defaultExpansion: DefaultExpansionMode
+    let isNotchStyle: Bool
     let onClose: () -> Void
 
     @State private var expanded: Bool
@@ -145,6 +155,7 @@ private struct NotchContent: View {
         residenceSeconds: TimeInterval,
         reduceMotion: Bool,
         defaultExpansion: DefaultExpansionMode,
+        isNotchStyle: Bool,
         onClose: @escaping () -> Void
     ) {
         self.event = event
@@ -154,6 +165,7 @@ private struct NotchContent: View {
         self.residenceSeconds = residenceSeconds
         self.reduceMotion = reduceMotion
         self.defaultExpansion = defaultExpansion
+        self.isNotchStyle = isNotchStyle
         self.onClose = onClose
         // Honour the user's default-expansion preference on first paint.
         // After that, user interaction drives the state.
@@ -164,7 +176,10 @@ private struct NotchContent: View {
     // arrivalEffect의 pulse shadow(radius ~26pt)가 pill 위쪽으로 번지면서
     // 그 곡선에 걸려 윗변이 잘려 보이는 현상이 있어, 콘텐츠를 노치 바닥에서
     // 한 호흡 더 내려 pulse가 숨 쉴 여백을 확보한다.
+    // floating 스타일(외장 모니터/노치 없는 디스플레이)에선 NotchShape
+    // 곡선 자체가 없어 이 보정이 오히려 pill을 아래로 치우쳐 보이게 한다.
     private let notchTopInset: CGFloat = 8
+    private var effectiveTopInset: CGFloat { isNotchStyle ? notchTopInset : 0 }
 
     var body: some View {
         Group {
@@ -210,7 +225,7 @@ private struct NotchContent: View {
         //   안쪽 fade는 살짝 더 짧게 잡아 컨텐츠 교체가 리사이즈 중반쯤
         //   이미 끝나도록 — 새 사이즈에 자리 잡은 후 스냅으로 보이지
         //   않도록 완성 타이밍을 앞당긴다.
-        .padding(.top, notchTopInset)
+        .padding(.top, effectiveTopInset)
         .animation(.easeInOut(duration: 0.28), value: expanded)
         .onChange(of: expanded) { isExpanded in
             handleExpansionChange(isExpanded: isExpanded)
