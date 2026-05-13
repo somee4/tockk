@@ -22,6 +22,7 @@ CommandRunner = Callable[[list[str]], str]
 EventSender = Callable[[pathlib.Path, str], None]
 Sleeper = Callable[[float], None]
 SocketVerifier = Callable[[pathlib.Path], None]
+SocketFactory = Callable[[int, int], socket.socket]
 
 
 class MeasurementError(RuntimeError):
@@ -167,11 +168,20 @@ def collect_sample(
     )
 
 
-def write_summary_json(run_dir: pathlib.Path, config: dict, samples: list[Sample]) -> None:
+def write_summary_json(
+    run_dir: pathlib.Path,
+    config: dict,
+    samples: list[Sample],
+    status: str = "success",
+    failure: dict[str, str | int | None] | None = None,
+) -> None:
     payload = {
+        "status": status,
         "config": config,
         "samples": [asdict(sample) for sample in samples],
     }
+    if failure is not None:
+        payload["failure"] = failure
     write_text(run_dir / "summary.json", json.dumps(payload, indent=2, sort_keys=True))
 
 
@@ -218,6 +228,19 @@ def verify_socket(path: pathlib.Path) -> None:
         raise MeasurementError(f"path is not a socket: {path}")
 
 
+def probe_socket_connection(
+    path: pathlib.Path,
+    socket_verifier: SocketVerifier = verify_socket,
+    socket_factory: SocketFactory = socket.socket,
+) -> None:
+    socket_verifier(path)
+    try:
+        with socket_factory(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+            client.connect(str(path))
+    except OSError as error:
+        raise MeasurementError(f"failed to connect to socket {path}: {error}") from error
+
+
 def positive_int(raw: str) -> int:
     try:
         value = int(raw)
@@ -225,6 +248,16 @@ def positive_int(raw: str) -> int:
         raise argparse.ArgumentTypeError(f"must be an integer: {raw}") from error
     if value <= 0:
         raise argparse.ArgumentTypeError("must be greater than 0")
+    return value
+
+
+def non_negative_int(raw: str) -> int:
+    try:
+        value = int(raw)
+    except ValueError as error:
+        raise argparse.ArgumentTypeError(f"must be an integer: {raw}") from error
+    if value < 0:
+        raise argparse.ArgumentTypeError("must be greater than or equal to 0")
     return value
 
 
@@ -242,7 +275,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Measure Tockk long-run memory behavior.")
     parser.add_argument("--count", type=positive_int, default=100)
     parser.add_argument("--delay", type=non_negative_float, default=2.8)
-    parser.add_argument("--sample-every", type=positive_int, default=25)
+    parser.add_argument("--sample-every", type=non_negative_int, default=25)
     parser.add_argument("--cooldown", type=non_negative_float, default=10.0)
     parser.add_argument("--socket", type=pathlib.Path, default=DEFAULT_SOCKET_PATH)
     parser.add_argument("--output-root", type=pathlib.Path, default=DEFAULT_OUTPUT_ROOT)
@@ -251,9 +284,13 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
-def dry_run(args: argparse.Namespace, runner: CommandRunner = run_command) -> int:
+def dry_run(
+    args: argparse.Namespace,
+    runner: CommandRunner = run_command,
+    socket_verifier: SocketVerifier = probe_socket_connection,
+) -> int:
     process = find_tockk_process(runner)
-    verify_socket(args.socket)
+    socket_verifier(args.socket)
     output_dir = build_run_directory(args.output_root)
     print("tockk measurement dry-run")
     print(f"pid: {process.pid}")
@@ -412,12 +449,13 @@ def send_event(socket_path: pathlib.Path, payload: str) -> None:
 def sample_labels_for_count(count: int, sample_every: int) -> dict[int, str]:
     if count <= 0:
         raise MeasurementError("--count must be greater than zero")
-    if sample_every <= 0:
-        raise MeasurementError("--sample-every must be greater than zero")
+    if sample_every < 0:
+        raise MeasurementError("--sample-every must be zero or greater")
 
     labels: dict[int, str] = {}
-    for index in range(sample_every, count + 1, sample_every):
-        labels[index] = f"event-{index:04d}"
+    if sample_every > 0:
+        for index in range(sample_every, count + 1, sample_every):
+            labels[index] = f"event-{index:04d}"
     labels[count] = "final"
     return labels
 
@@ -427,14 +465,14 @@ def run_measurement(
     runner: CommandRunner = run_command,
     sender: EventSender = send_event,
     sleeper: Sleeper = time.sleep,
-    socket_verifier: SocketVerifier = verify_socket,
+    socket_verifier: SocketVerifier = probe_socket_connection,
 ) -> int:
     if args.count <= 0:
         raise MeasurementError("--count must be greater than zero")
     if args.delay < 0:
         raise MeasurementError("--delay must be zero or greater")
-    if args.sample_every <= 0:
-        raise MeasurementError("--sample-every must be greater than zero")
+    if args.sample_every < 0:
+        raise MeasurementError("--sample-every must be zero or greater")
     if args.cooldown < 0:
         raise MeasurementError("--cooldown must be zero or greater")
 
@@ -446,6 +484,8 @@ def run_measurement(
 
     labels = sample_labels_for_count(args.count, args.sample_every)
     samples: list[Sample] = []
+    last_attempted_event: int | None = None
+    last_sent_event: int | None = None
     config = {
         "pid": process.pid,
         "event_count": args.count,
@@ -457,50 +497,66 @@ def run_measurement(
         "output_dir": str(run_dir),
     }
 
-    print(f"tockk-measure: writing run to {run_dir}")
-    samples.append(
-        collect_sample(
-            label="baseline",
-            pid=process.pid,
-            run_dir=run_dir,
-            runner=runner,
-            include_leaks=not args.skip_leaks,
-        )
-    )
-
-    for index in range(1, args.count + 1):
-        sender(args.socket, build_event_payload(index, args.count))
-        if index in labels:
-            samples.append(
-                collect_sample(
-                    label=labels[index],
-                    pid=process.pid,
-                    run_dir=run_dir,
-                    runner=runner,
-                    include_leaks=not args.skip_leaks,
-                )
+    try:
+        print(f"tockk-measure: writing run to {run_dir}")
+        samples.append(
+            collect_sample(
+                label="baseline",
+                pid=process.pid,
+                run_dir=run_dir,
+                runner=runner,
+                include_leaks=not args.skip_leaks,
             )
-        if index != args.count:
-            sleeper(args.delay)
-
-    if args.cooldown > 0:
-        sleeper(args.cooldown)
-    samples.append(
-        collect_sample(
-            label="post-cooldown",
-            pid=process.pid,
-            run_dir=run_dir,
-            runner=runner,
-            include_leaks=not args.skip_leaks,
         )
-    )
 
-    delta = build_delta_summary(samples[0], samples[-1])
-    config["post_cooldown_delta"] = delta
-    write_summary_json(run_dir, config, samples)
-    print_delta_summary(delta)
-    print(f"tockk-measure: raw output saved to {run_dir}")
-    return 0
+        for index in range(1, args.count + 1):
+            last_attempted_event = index
+            sender(args.socket, build_event_payload(index, args.count))
+            last_sent_event = index
+            if index in labels:
+                samples.append(
+                    collect_sample(
+                        label=labels[index],
+                        pid=process.pid,
+                        run_dir=run_dir,
+                        runner=runner,
+                        include_leaks=not args.skip_leaks,
+                    )
+                )
+            if index != args.count:
+                sleeper(args.delay)
+
+        if args.cooldown > 0:
+            sleeper(args.cooldown)
+        samples.append(
+            collect_sample(
+                label="post-cooldown",
+                pid=process.pid,
+                run_dir=run_dir,
+                runner=runner,
+                include_leaks=not args.skip_leaks,
+            )
+        )
+
+        delta = build_delta_summary(samples[0], samples[-1])
+        config["post_cooldown_delta"] = delta
+        write_summary_json(run_dir, config, samples)
+        print_delta_summary(delta)
+        print(f"tockk-measure: raw output saved to {run_dir}")
+        return 0
+    except MeasurementError as error:
+        write_summary_json(
+            run_dir,
+            config,
+            samples,
+            status="failure",
+            failure={
+                "message": str(error),
+                "last_attempted_event": last_attempted_event,
+                "last_sent_event": last_sent_event,
+            },
+        )
+        raise
 
 
 def print_delta_summary(delta: dict[str, int | None]) -> None:
@@ -511,6 +567,7 @@ def print_delta_summary(delta: dict[str, int | None]) -> None:
         "peak_physical_footprint_bytes_delta",
         "malloc_nodes_delta",
         "malloced_bytes_delta",
+        "leaked_bytes_delta",
     ]:
         value = delta.get(key)
         print(f"  {key}: {'unavailable' if value is None else value}")

@@ -89,9 +89,14 @@ Process 40090: 0 leaks for 0 total leaked bytes.
                 with self.assertRaises(SystemExit):
                     measure.parse_args(["--count", value])
 
-    def test_parse_args_rejects_invalid_sample_every(self):
+    def test_parse_args_allows_zero_sample_every(self):
+        args = measure.parse_args(["--sample-every", "0"])
+
+        self.assertEqual(args.sample_every, 0)
+
+    def test_parse_args_rejects_negative_sample_every(self):
         with self.assertRaises(SystemExit):
-            measure.parse_args(["--sample-every", "0"])
+            measure.parse_args(["--sample-every", "-1"])
 
     def test_parse_args_rejects_invalid_delay(self):
         with self.assertRaises(SystemExit):
@@ -348,6 +353,24 @@ class TargetDiscoveryTests(unittest.TestCase):
             with self.assertRaisesRegex(measure.MeasurementError, "path is not a socket"):
                 measure.verify_socket(measure.pathlib.Path(file.name))
 
+    def test_probe_socket_connection_wraps_connect_failure(self):
+        class FakeSocket:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, traceback):
+                return False
+
+            def connect(self, path):
+                raise OSError("connection refused")
+
+        with self.assertRaisesRegex(measure.MeasurementError, "failed to connect to socket"):
+            measure.probe_socket_connection(
+                measure.pathlib.Path("/tmp/stale.sock"),
+                socket_verifier=lambda path: None,
+                socket_factory=lambda family, kind: FakeSocket(),
+            )
+
 
 class EventPayloadTests(unittest.TestCase):
     def test_build_event_payload_has_protocol_fields(self):
@@ -373,6 +396,11 @@ class EventPayloadTests(unittest.TestCase):
         labels = measure.sample_labels_for_count(count=10, sample_every=4)
 
         self.assertEqual(labels, {4: "event-0004", 8: "event-0008", 10: "final"})
+
+    def test_sample_labels_for_count_zero_only_keeps_final(self):
+        labels = measure.sample_labels_for_count(count=10, sample_every=0)
+
+        self.assertEqual(labels, {10: "final"})
 
 
 class LiveMeasurementTests(unittest.TestCase):
@@ -431,6 +459,92 @@ Physical footprint (peak):  15.8M
             self.assertEqual([sample["label"] for sample in summary["samples"]], [
                 "baseline",
                 "event-0002",
+                "final",
+                "post-cooldown",
+            ])
+
+    def test_run_measurement_writes_failure_summary_when_sender_fails(self):
+        ps_all_output = """  PID     ELAPSED    RSS      VSZ COMM
+40090       01:24  100 435614928 /Applications/Tockk.app/Contents/MacOS/Tockk
+"""
+        vmmap_output = """Process:         Tockk [40090]
+Physical footprint:         15.5M
+"""
+
+        def failing_sender(path, payload):
+            raise measure.MeasurementError("send exploded")
+
+        with tempfile.TemporaryDirectory() as directory:
+            output_root = measure.pathlib.Path(directory)
+            args = measure.argparse.Namespace(
+                count=3,
+                delay=0,
+                sample_every=2,
+                cooldown=0,
+                socket=output_root / "tockk.sock",
+                output_root=output_root,
+                dry_run=False,
+                skip_leaks=True,
+            )
+            runner = FakeRunner([ps_all_output, ps_all_output, vmmap_output])
+
+            with self.assertRaisesRegex(measure.MeasurementError, "send exploded"):
+                measure.run_measurement(
+                    args,
+                    runner=runner,
+                    sender=failing_sender,
+                    sleeper=lambda seconds: None,
+                    socket_verifier=lambda path: None,
+                )
+
+            run_dirs = [path for path in output_root.iterdir() if path.is_dir()]
+            self.assertEqual(len(run_dirs), 1)
+            summary = measure.json.loads((run_dirs[0] / "summary.json").read_text(encoding="utf-8"))
+            self.assertEqual(summary["status"], "failure")
+            self.assertEqual(summary["failure"]["message"], "send exploded")
+            self.assertEqual(summary["failure"]["last_attempted_event"], 1)
+            self.assertIsNone(summary["failure"]["last_sent_event"])
+            self.assertEqual(summary["samples"][0]["label"], "baseline")
+
+    def test_run_measurement_allows_zero_sample_every(self):
+        ps_all_output = """  PID     ELAPSED    RSS      VSZ COMM
+40090       01:24  100 435614928 /Applications/Tockk.app/Contents/MacOS/Tockk
+"""
+        vmmap_output = """Process:         Tockk [40090]
+Physical footprint:         15.5M
+"""
+
+        with tempfile.TemporaryDirectory() as directory:
+            output_root = measure.pathlib.Path(directory)
+            args = measure.argparse.Namespace(
+                count=2,
+                delay=0,
+                sample_every=0,
+                cooldown=0,
+                socket=output_root / "tockk.sock",
+                output_root=output_root,
+                dry_run=False,
+                skip_leaks=True,
+            )
+            runner = FakeRunner([
+                ps_all_output,
+                ps_all_output, vmmap_output,
+                ps_all_output, vmmap_output,
+                ps_all_output, vmmap_output,
+            ])
+
+            measure.run_measurement(
+                args,
+                runner=runner,
+                sender=lambda path, payload: None,
+                sleeper=lambda seconds: None,
+                socket_verifier=lambda path: None,
+            )
+
+            run_dir = next(path for path in output_root.iterdir() if path.is_dir())
+            summary = measure.json.loads((run_dir / "summary.json").read_text(encoding="utf-8"))
+            self.assertEqual([sample["label"] for sample in summary["samples"]], [
+                "baseline",
                 "final",
                 "post-cooldown",
             ])
