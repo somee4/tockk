@@ -349,5 +349,110 @@ class TargetDiscoveryTests(unittest.TestCase):
                 measure.verify_socket(measure.pathlib.Path(file.name))
 
 
+class EventPayloadTests(unittest.TestCase):
+    def test_build_event_payload_has_protocol_fields(self):
+        payload = measure.build_event_payload(index=7, total=100)
+        event = measure.json.loads(payload)
+        self.assertEqual(event["agent"], "tockk-measure")
+        self.assertEqual(event["project"], "long-run")
+        self.assertEqual(event["status"], "info")
+        self.assertEqual(event["title"], "Long-run measurement 7/100")
+        self.assertIn("timestamp", event)
+
+    def test_build_event_payload_is_newline_terminated(self):
+        payload = measure.build_event_payload(index=1, total=2)
+
+        self.assertTrue(payload.endswith("\n"))
+
+    def test_sample_labels_for_count(self):
+        labels = measure.sample_labels_for_count(count=100, sample_every=25)
+
+        self.assertEqual(labels, {25: "event-0025", 50: "event-0050", 75: "event-0075", 100: "final"})
+
+    def test_sample_labels_for_count_keeps_final_when_count_not_multiple(self):
+        labels = measure.sample_labels_for_count(count=10, sample_every=4)
+
+        self.assertEqual(labels, {4: "event-0004", 8: "event-0008", 10: "final"})
+
+
+class LiveMeasurementTests(unittest.TestCase):
+    def test_run_measurement_sends_events_collects_samples_and_writes_summary(self):
+        ps_all_output = """  PID     ELAPSED    RSS      VSZ COMM
+40090       01:24  100 435614928 /Applications/Tockk.app/Contents/MacOS/Tockk
+"""
+        vmmap_output = """Process:         Tockk [40090]
+Physical footprint:         15.5M
+Physical footprint (peak):  15.8M
+"""
+
+        with tempfile.TemporaryDirectory() as directory:
+            output_root = measure.pathlib.Path(directory)
+            socket_path = output_root / "tockk.sock"
+            sent_payloads = []
+            sleeps = []
+
+            args = measure.argparse.Namespace(
+                count=3,
+                delay=0.25,
+                sample_every=2,
+                cooldown=0.5,
+                socket=socket_path,
+                output_root=output_root,
+                dry_run=False,
+                skip_leaks=True,
+            )
+            runner = FakeRunner([
+                ps_all_output,
+                ps_all_output, vmmap_output,
+                ps_all_output, vmmap_output,
+                ps_all_output, vmmap_output,
+                ps_all_output, vmmap_output,
+            ])
+
+            result = measure.run_measurement(
+                args,
+                runner=runner,
+                sender=lambda path, payload: sent_payloads.append((path, payload)),
+                sleeper=sleeps.append,
+                socket_verifier=lambda path: None,
+            )
+
+            self.assertEqual(result, 0)
+            self.assertEqual(len(sent_payloads), 3)
+            self.assertEqual([sleep for sleep in sleeps], [0.25, 0.25, 0.5])
+            self.assertEqual(sent_payloads[0][0], socket_path)
+            self.assertEqual(measure.json.loads(sent_payloads[0][1])["title"], "Long-run measurement 1/3")
+
+            run_dirs = [path for path in output_root.iterdir() if path.is_dir()]
+            self.assertEqual(len(run_dirs), 1)
+            summary = measure.json.loads((run_dirs[0] / "summary.json").read_text(encoding="utf-8"))
+            self.assertEqual(summary["config"]["event_count"], 3)
+            self.assertEqual(summary["config"]["sample_every"], 2)
+            self.assertEqual([sample["label"] for sample in summary["samples"]], [
+                "baseline",
+                "event-0002",
+                "final",
+                "post-cooldown",
+            ])
+
+    def test_run_measurement_rejects_non_positive_count(self):
+        args = measure.argparse.Namespace(count=0, delay=0, sample_every=1)
+
+        with self.assertRaisesRegex(measure.MeasurementError, "--count"):
+            measure.run_measurement(args, runner=FakeRunner([]))
+
+    def test_main_runs_live_measurement_branch(self):
+        original_run_measurement = measure.run_measurement
+        calls = []
+        measure.run_measurement = lambda args: calls.append(args) or 0
+        try:
+            result = measure.main(["--count", "1", "--delay", "0", "--cooldown", "0"])
+        finally:
+            measure.run_measurement = original_run_measurement
+
+        self.assertEqual(result, 0)
+        self.assertEqual(len(calls), 1)
+
+
 if __name__ == "__main__":
     unittest.main()
