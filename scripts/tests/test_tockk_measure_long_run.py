@@ -1,3 +1,4 @@
+import json
 import tempfile
 import unittest
 
@@ -99,6 +100,96 @@ Process 40090: 0 leaks for 0 total leaked bytes.
     def test_parse_args_rejects_invalid_cooldown(self):
         with self.assertRaises(SystemExit):
             measure.parse_args(["--cooldown", "-1"])
+
+
+class ArtifactCollectionTests(unittest.TestCase):
+    def test_collect_sample_writes_raw_outputs(self):
+        ps_output = """  PID     ELAPSED    RSS      VSZ COMM
+40090       01:24  67952 435614928 /Applications/Tockk.app/Contents/MacOS/Tockk
+"""
+        vmmap_output = """Process:         Tockk [40090]
+Physical footprint:         15.5M
+Physical footprint (peak):  15.8M
+"""
+        leaks_output = """Process 40090: 30314 nodes malloced for 10202 KB
+Process 40090: 0 leaks for 0 total leaked bytes.
+"""
+
+        with tempfile.TemporaryDirectory() as directory:
+            run_dir = measure.pathlib.Path(directory)
+            runner = FakeRunner([ps_output, vmmap_output, leaks_output])
+
+            sample = measure.collect_sample(
+                label="baseline",
+                pid=40090,
+                run_dir=run_dir,
+                runner=runner,
+                include_leaks=True,
+            )
+
+            self.assertTrue((run_dir / "baseline.ps.txt").exists())
+            self.assertTrue((run_dir / "baseline.vmmap.txt").exists())
+            self.assertTrue((run_dir / "baseline.leaks.txt").exists())
+            self.assertEqual(sample.leaks.malloc_nodes, 30314)
+            self.assertEqual(
+                runner.commands,
+                [
+                    ["ps", "-p", "40090", "-o", "pid,etime,rss,vsz,comm"],
+                    ["vmmap", "-summary", "40090"],
+                    ["leaks", "40090"],
+                ],
+            )
+
+    def test_collect_sample_skips_leaks_when_disabled(self):
+        ps_output = """  PID     ELAPSED    RSS      VSZ COMM
+40090       01:24  67952 435614928 /Applications/Tockk.app/Contents/MacOS/Tockk
+"""
+        vmmap_output = """Process:         Tockk [40090]
+Physical footprint:         15.5M
+"""
+
+        with tempfile.TemporaryDirectory() as directory:
+            run_dir = measure.pathlib.Path(directory)
+            runner = FakeRunner([ps_output, vmmap_output])
+
+            sample = measure.collect_sample(
+                label="baseline",
+                pid=40090,
+                run_dir=run_dir,
+                runner=runner,
+                include_leaks=False,
+            )
+
+            self.assertTrue((run_dir / "baseline.ps.txt").exists())
+            self.assertTrue((run_dir / "baseline.vmmap.txt").exists())
+            self.assertFalse((run_dir / "baseline.leaks.txt").exists())
+            self.assertIsNone(sample.leaks.malloc_nodes)
+            self.assertIsNone(sample.leaks.malloced_bytes)
+            self.assertIsNone(sample.leaks.leaked_bytes)
+            self.assertEqual(
+                runner.commands,
+                [
+                    ["ps", "-p", "40090", "-o", "pid,etime,rss,vsz,comm"],
+                    ["vmmap", "-summary", "40090"],
+                ],
+            )
+
+    def test_write_summary_json(self):
+        sample = measure.Sample(
+            label="baseline",
+            process=measure.ProcessInfo(40090, "00:01", 100, 1000, "/Applications/Tockk.app/Contents/MacOS/Tockk"),
+            vmmap=measure.VMMapMetrics(physical_footprint_bytes=1000),
+            leaks=measure.LeaksMetrics(malloc_nodes=30314, malloced_bytes=10_446_848, leaked_bytes=0),
+        )
+
+        with tempfile.TemporaryDirectory() as directory:
+            run_dir = measure.pathlib.Path(directory)
+
+            measure.write_summary_json(run_dir, {"event_count": 0}, [sample])
+
+            payload = json.loads((run_dir / "summary.json").read_text(encoding="utf-8"))
+            self.assertEqual(payload["config"], {"event_count": 0})
+            self.assertEqual(payload["samples"][0]["label"], "baseline")
 
 
 class TargetDiscoveryTests(unittest.TestCase):

@@ -3,12 +3,13 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import json
 import pathlib
 import re
 import stat
 import subprocess
 import sys
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from typing import Callable
 
 
@@ -105,6 +106,53 @@ def run_command(command: list[str]) -> str:
     if result.returncode != 0:
         raise MeasurementError(f"command failed ({command_text}): {output.strip()}")
     return output
+
+
+def write_text(path: pathlib.Path, text: str) -> None:
+    path.write_text(text, encoding="utf-8")
+
+
+def collect_sample(
+    label: str,
+    pid: int,
+    run_dir: pathlib.Path,
+    runner: CommandRunner = run_command,
+    include_leaks: bool = True,
+) -> Sample:
+    ps_output = runner(["ps", "-p", str(pid), "-o", "pid,etime,rss,vsz,comm"])
+    write_text(run_dir / f"{label}.ps.txt", ps_output)
+    process = parse_ps_output(ps_output)
+
+    vmmap_output = runner(["vmmap", "-summary", str(pid)])
+    write_text(run_dir / f"{label}.vmmap.txt", vmmap_output)
+    try:
+        vmmap = parse_vmmap_summary(vmmap_output)
+    except (MeasurementError, ValueError, IndexError):
+        vmmap = VMMapMetrics()
+
+    leaks = LeaksMetrics()
+    if include_leaks:
+        leaks_output = runner(["leaks", str(pid)])
+        write_text(run_dir / f"{label}.leaks.txt", leaks_output)
+        try:
+            leaks = parse_leaks_summary(leaks_output)
+        except (MeasurementError, ValueError, IndexError):
+            leaks = LeaksMetrics()
+
+    return Sample(
+        label=label,
+        process=process,
+        vmmap=vmmap,
+        leaks=leaks,
+    )
+
+
+def write_summary_json(run_dir: pathlib.Path, config: dict, samples: list[Sample]) -> None:
+    payload = {
+        "config": config,
+        "samples": [asdict(sample) for sample in samples],
+    }
+    write_text(run_dir / "summary.json", json.dumps(payload, indent=2, sort_keys=True))
 
 
 def find_tockk_process(runner: CommandRunner = run_command) -> ProcessInfo:
