@@ -103,6 +103,29 @@ Process 40090: 0 leaks for 0 total leaked bytes.
 
 
 class ArtifactCollectionTests(unittest.TestCase):
+    def test_collect_sample_creates_missing_run_dir_for_raw_outputs(self):
+        ps_output = """  PID     ELAPSED    RSS      VSZ COMM
+40090       01:24  67952 435614928 /Applications/Tockk.app/Contents/MacOS/Tockk
+"""
+        vmmap_output = """Process:         Tockk [40090]
+Physical footprint:         15.5M
+"""
+
+        with tempfile.TemporaryDirectory() as directory:
+            run_dir = measure.pathlib.Path(directory) / "missing" / "run"
+            runner = FakeRunner([ps_output, vmmap_output])
+
+            measure.collect_sample(
+                label="baseline",
+                pid=40090,
+                run_dir=run_dir,
+                runner=runner,
+                include_leaks=False,
+            )
+
+            self.assertTrue((run_dir / "baseline.ps.txt").exists())
+            self.assertTrue((run_dir / "baseline.vmmap.txt").exists())
+
     def test_collect_sample_writes_raw_outputs(self):
         ps_output = """  PID     ELAPSED    RSS      VSZ COMM
 40090       01:24  67952 435614928 /Applications/Tockk.app/Contents/MacOS/Tockk
@@ -191,6 +214,16 @@ Physical footprint:         15.5M
             self.assertEqual(payload["config"], {"event_count": 0})
             self.assertEqual(payload["samples"][0]["label"], "baseline")
 
+    def test_write_summary_json_creates_missing_run_dir(self):
+        with tempfile.TemporaryDirectory() as directory:
+            run_dir = measure.pathlib.Path(directory) / "missing" / "run"
+
+            measure.write_summary_json(run_dir, {"event_count": 0}, [])
+
+            payload = json.loads((run_dir / "summary.json").read_text(encoding="utf-8"))
+            self.assertEqual(payload["config"], {"event_count": 0})
+            self.assertEqual(payload["samples"], [])
+
 
 class TargetDiscoveryTests(unittest.TestCase):
     def test_run_command_wraps_oserror_with_command_context(self):
@@ -202,6 +235,42 @@ class TargetDiscoveryTests(unittest.TestCase):
         try:
             with self.assertRaisesRegex(measure.MeasurementError, "failed to start command.*ps"):
                 measure.run_command(["ps", "-axo", "pid,etime,rss,vsz,comm"])
+        finally:
+            measure.subprocess.run = original_run
+
+    def test_run_leaks_command_accepts_exit_1_and_returns_output(self):
+        class Completed:
+            stdout = "Process 40090: 1 leaks for 16 total leaked bytes.\n"
+            stderr = "warning: leak details\n"
+            returncode = 1
+
+        def fake_run(command, capture_output, text, check):
+            return Completed()
+
+        original_run = measure.subprocess.run
+        measure.subprocess.run = fake_run
+        try:
+            output = measure.run_leaks_command(["leaks", "40090"])
+        finally:
+            measure.subprocess.run = original_run
+
+        self.assertIn("1 leaks", output)
+        self.assertIn("warning: leak details", output)
+
+    def test_run_leaks_command_rejects_other_nonzero_exit_codes(self):
+        class Completed:
+            stdout = ""
+            stderr = "leaks: cannot examine process\n"
+            returncode = 2
+
+        def fake_run(command, capture_output, text, check):
+            return Completed()
+
+        original_run = measure.subprocess.run
+        measure.subprocess.run = fake_run
+        try:
+            with self.assertRaisesRegex(measure.MeasurementError, "command failed"):
+                measure.run_leaks_command(["leaks", "40090"])
         finally:
             measure.subprocess.run = original_run
 

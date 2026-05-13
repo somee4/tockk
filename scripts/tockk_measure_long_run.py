@@ -108,7 +108,20 @@ def run_command(command: list[str]) -> str:
     return output
 
 
+def run_leaks_command(command: list[str]) -> str:
+    command_text = " ".join(command)
+    try:
+        result = subprocess.run(command, capture_output=True, text=True, check=False)
+    except OSError as error:
+        raise MeasurementError(f"failed to start command ({command_text}): {error}") from error
+    output = f"{result.stdout}{result.stderr}"
+    if result.returncode not in (0, 1):
+        raise MeasurementError(f"command failed ({command_text}): {output.strip()}")
+    return output
+
+
 def write_text(path: pathlib.Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(text, encoding="utf-8")
 
 
@@ -117,6 +130,7 @@ def collect_sample(
     pid: int,
     run_dir: pathlib.Path,
     runner: CommandRunner = run_command,
+    leaks_runner: CommandRunner | None = None,
     include_leaks: bool = True,
 ) -> Sample:
     ps_output = runner(["ps", "-p", str(pid), "-o", "pid,etime,rss,vsz,comm"])
@@ -132,7 +146,8 @@ def collect_sample(
 
     leaks = LeaksMetrics()
     if include_leaks:
-        leaks_output = runner(["leaks", str(pid)])
+        active_leaks_runner = leaks_runner or (run_leaks_command if runner is run_command else runner)
+        leaks_output = active_leaks_runner(["leaks", str(pid)])
         write_text(run_dir / f"{label}.leaks.txt", leaks_output)
         try:
             leaks = parse_leaks_summary(leaks_output)
