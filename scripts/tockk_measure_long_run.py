@@ -1,14 +1,21 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import argparse
+import datetime as dt
 import pathlib
 import re
+import stat
+import subprocess
+import sys
 from dataclasses import dataclass, field
+from typing import Callable
 
 
 TOCKK_APP_PATH = "/Applications/Tockk.app/Contents/MacOS/Tockk"
 DEFAULT_SOCKET_PATH = pathlib.Path.home() / "Library/Application Support/Tockk/tockk.sock"
 DEFAULT_OUTPUT_ROOT = pathlib.Path(".local/tockk-measurements")
+CommandRunner = Callable[[list[str]], str]
 
 
 class MeasurementError(RuntimeError):
@@ -86,6 +93,120 @@ def parse_ps_output(output: str) -> ProcessInfo:
         vsz_kb=int(parts[3]),
         command=parts[4],
     )
+
+
+def run_command(command: list[str]) -> str:
+    command_text = " ".join(command)
+    try:
+        result = subprocess.run(command, capture_output=True, text=True, check=False)
+    except OSError as error:
+        raise MeasurementError(f"failed to start command ({command_text}): {error}") from error
+    output = f"{result.stdout}{result.stderr}"
+    if result.returncode != 0:
+        raise MeasurementError(f"command failed ({command_text}): {output.strip()}")
+    return output
+
+
+def find_tockk_process(runner: CommandRunner = run_command) -> ProcessInfo:
+    command = ["ps", "-axo", "pid,etime,rss,vsz,comm"]
+    output = runner(command)
+    rows = [line for line in output.splitlines() if line.strip()]
+    header = rows[0] if rows else "PID ELAPSED RSS VSZ COMM"
+    matches = []
+    for line in rows[1:]:
+        parts = line.split(maxsplit=4)
+        if len(parts) == 5 and parts[4] == TOCKK_APP_PATH:
+            matches.append(line)
+    if not matches:
+        raise MeasurementError(f"Tockk is not running at {TOCKK_APP_PATH}")
+    if len(matches) > 1:
+        raise MeasurementError(f"found more than one installed Tockk process at {TOCKK_APP_PATH}")
+    return parse_ps_output(f"{header}\n{matches[0]}\n")
+
+
+def build_run_directory(root: pathlib.Path, now: dt.datetime | None = None) -> pathlib.Path:
+    timestamp = (now or dt.datetime.now()).strftime("%Y%m%d-%H%M%S")
+    return root / timestamp
+
+
+def stat_is_socket_mode(mode: int) -> bool:
+    return stat.S_ISSOCK(mode)
+
+
+def stat_is_socket(path: pathlib.Path) -> bool:
+    return stat_is_socket_mode(path.stat().st_mode)
+
+
+def verify_socket(path: pathlib.Path) -> None:
+    try:
+        path_stat = path.stat()
+    except FileNotFoundError as error:
+        raise MeasurementError(f"socket does not exist: {path}") from error
+    except PermissionError as error:
+        raise MeasurementError(f"permission denied while checking socket: {path}") from error
+    except OSError as error:
+        raise MeasurementError(f"failed to check socket: {path}: {error}") from error
+    if not stat_is_socket_mode(path_stat.st_mode):
+        raise MeasurementError(f"path is not a socket: {path}")
+
+
+def positive_int(raw: str) -> int:
+    try:
+        value = int(raw)
+    except ValueError as error:
+        raise argparse.ArgumentTypeError(f"must be an integer: {raw}") from error
+    if value <= 0:
+        raise argparse.ArgumentTypeError("must be greater than 0")
+    return value
+
+
+def non_negative_float(raw: str) -> float:
+    try:
+        value = float(raw)
+    except ValueError as error:
+        raise argparse.ArgumentTypeError(f"must be a number: {raw}") from error
+    if value < 0:
+        raise argparse.ArgumentTypeError("must be greater than or equal to 0")
+    return value
+
+
+def parse_args(argv: list[str]) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Measure Tockk long-run memory behavior.")
+    parser.add_argument("--count", type=positive_int, default=100)
+    parser.add_argument("--delay", type=non_negative_float, default=2.8)
+    parser.add_argument("--sample-every", type=positive_int, default=25)
+    parser.add_argument("--cooldown", type=non_negative_float, default=10.0)
+    parser.add_argument("--socket", type=pathlib.Path, default=DEFAULT_SOCKET_PATH)
+    parser.add_argument("--output-root", type=pathlib.Path, default=DEFAULT_OUTPUT_ROOT)
+    parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--skip-leaks", action="store_true")
+    return parser.parse_args(argv)
+
+
+def dry_run(args: argparse.Namespace, runner: CommandRunner = run_command) -> int:
+    process = find_tockk_process(runner)
+    verify_socket(args.socket)
+    output_dir = build_run_directory(args.output_root)
+    print("tockk measurement dry-run")
+    print(f"pid: {process.pid}")
+    print(f"elapsed: {process.elapsed}")
+    print(f"rss_kb: {process.rss_kb}")
+    print(f"socket: {args.socket}")
+    print(f"planned_events: {args.count}")
+    print(f"delay_seconds: {args.delay}")
+    print(f"output_dir: {output_dir}")
+    return 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    try:
+        args = parse_args(sys.argv[1:] if argv is None else argv)
+        if args.dry_run:
+            return dry_run(args)
+        raise MeasurementError("live measurement is not implemented yet; run --dry-run first")
+    except MeasurementError as error:
+        print(f"tockk-measure: {error}", file=sys.stderr)
+        return 2
 
 
 def _last_int(line: str) -> int | None:
@@ -196,3 +317,7 @@ def build_delta_summary(baseline: Sample, post_cooldown: Sample) -> dict[str, in
             post_cooldown.leaks.leaked_bytes,
         ),
     }
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

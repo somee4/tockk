@@ -1,6 +1,17 @@
+import tempfile
 import unittest
 
 from scripts import tockk_measure_long_run as measure
+
+
+class FakeRunner:
+    def __init__(self, outputs):
+        self.outputs = list(outputs)
+        self.commands = []
+
+    def __call__(self, command):
+        self.commands.append(command)
+        return self.outputs.pop(0)
 
 
 class ParserTests(unittest.TestCase):
@@ -70,6 +81,112 @@ Process 40090: 0 leaks for 0 total leaked bytes.
         self.assertEqual(summary["physical_footprint_bytes_delta"], 1200)
         self.assertEqual(summary["malloc_nodes_delta"], 15)
         self.assertEqual(summary["leaked_bytes_delta"], 10)
+
+    def test_parse_args_rejects_invalid_count(self):
+        for value in ["0", "-1"]:
+            with self.subTest(value=value):
+                with self.assertRaises(SystemExit):
+                    measure.parse_args(["--count", value])
+
+    def test_parse_args_rejects_invalid_sample_every(self):
+        with self.assertRaises(SystemExit):
+            measure.parse_args(["--sample-every", "0"])
+
+    def test_parse_args_rejects_invalid_delay(self):
+        with self.assertRaises(SystemExit):
+            measure.parse_args(["--delay", "-0.1"])
+
+    def test_parse_args_rejects_invalid_cooldown(self):
+        with self.assertRaises(SystemExit):
+            measure.parse_args(["--cooldown", "-1"])
+
+
+class TargetDiscoveryTests(unittest.TestCase):
+    def test_run_command_wraps_oserror_with_command_context(self):
+        def raise_oserror(command, capture_output, text, check):
+            raise OSError(1, "Operation not permitted", "ps")
+
+        original_run = measure.subprocess.run
+        measure.subprocess.run = raise_oserror
+        try:
+            with self.assertRaisesRegex(measure.MeasurementError, "failed to start command.*ps"):
+                measure.run_command(["ps", "-axo", "pid,etime,rss,vsz,comm"])
+        finally:
+            measure.subprocess.run = original_run
+
+    def test_find_installed_tockk_process(self):
+        runner = FakeRunner([
+            """  PID     ELAPSED    RSS      VSZ COMM
+12345       05:00   1000     2000 /usr/bin/other
+40090       01:24  67952 435614928 /Applications/Tockk.app/Contents/MacOS/Tockk
+"""
+        ])
+
+        process = measure.find_tockk_process(runner)
+
+        self.assertEqual(process.pid, 40090)
+        self.assertEqual(runner.commands, [["ps", "-axo", "pid,etime,rss,vsz,comm"]])
+
+    def test_find_tockk_process_ignores_helper_and_selects_exact_app_command(self):
+        runner = FakeRunner([
+            """  PID     ELAPSED    RSS      VSZ COMM
+40089       01:23  67951 435614927 /Applications/Tockk.app/Contents/MacOS/Tockk-helper
+40090       01:24  67952 435614928 /Applications/Tockk.app/Contents/MacOS/Tockk
+"""
+        ])
+
+        process = measure.find_tockk_process(runner)
+
+        self.assertEqual(process.pid, 40090)
+        self.assertEqual(process.command, "/Applications/Tockk.app/Contents/MacOS/Tockk")
+
+    def test_find_tockk_process_fails_when_missing(self):
+        runner = FakeRunner(["  PID     ELAPSED    RSS      VSZ COMM\n"])
+
+        with self.assertRaisesRegex(measure.MeasurementError, "Tockk is not running"):
+            measure.find_tockk_process(runner)
+
+    def test_find_tockk_process_fails_when_multiple_installed_apps(self):
+        runner = FakeRunner([
+            """  PID     ELAPSED    RSS      VSZ COMM
+40090       01:24  67952 435614928 /Applications/Tockk.app/Contents/MacOS/Tockk
+40091       01:25  67953 435614929 /Applications/Tockk.app/Contents/MacOS/Tockk
+"""
+        ])
+
+        with self.assertRaisesRegex(measure.MeasurementError, "more than one"):
+            measure.find_tockk_process(runner)
+
+    def test_build_run_directory_uses_timestamp(self):
+        root = measure.pathlib.Path(".local/tockk-measurements")
+        now = measure.dt.datetime(2026, 5, 13, 15, 30, 0)
+
+        result = measure.build_run_directory(root, now)
+
+        self.assertEqual(result, measure.pathlib.Path(".local/tockk-measurements/20260513-153000"))
+
+    def test_verify_socket_wraps_missing_path(self):
+        with tempfile.TemporaryDirectory() as directory:
+            missing_path = measure.pathlib.Path(directory) / "missing.sock"
+
+            with self.assertRaisesRegex(measure.MeasurementError, "socket does not exist"):
+                measure.verify_socket(missing_path)
+
+    def test_verify_socket_wraps_stat_oserror(self):
+        class StatFailurePath:
+            def stat(self):
+                raise OSError("stat failed")
+
+            def __str__(self):
+                return "/tmp/tockk-measure-denied.sock"
+
+        with self.assertRaisesRegex(measure.MeasurementError, "failed to check socket"):
+            measure.verify_socket(StatFailurePath())
+
+    def test_verify_socket_rejects_non_socket_mode(self):
+        with tempfile.NamedTemporaryFile() as file:
+            with self.assertRaisesRegex(measure.MeasurementError, "path is not a socket"):
+                measure.verify_socket(measure.pathlib.Path(file.name))
 
 
 if __name__ == "__main__":
