@@ -39,6 +39,7 @@ AGENTS.md
 .tmp-send-review.*/
 
 # Local-only docs working state
+docs/**
 docs/plan.md
 docs/archive/
 docs/superpowers/plans/

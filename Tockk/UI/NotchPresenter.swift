@@ -2,11 +2,45 @@ import SwiftUI
 import AppKit
 import DynamicNotchKit
 
+@MainActor
+protocol DynamicNotchControlling: AnyObject {
+    var transitionConfiguration: DynamicNotchTransitionConfiguration { get set }
+
+    func expand(on screen: NSScreen) async
+    func expand() async
+    func hide() async
+}
+
+extension DynamicNotch: DynamicNotchControlling {
+    func expand() async {
+        guard let screen = NSScreen.screens.first else { return }
+        await expand(on: screen)
+    }
+}
+
+struct NotchPresentation: Identifiable {
+    let id = UUID()
+    let event: Event
+    let pendingCount: Int
+    let theme: AppTheme
+    let residence: AlertResidenceMode
+    let residenceSeconds: TimeInterval
+    let reduceMotion: Bool
+    let defaultExpansion: DefaultExpansionMode
+    let isNotchStyle: Bool
+    let onClose: () -> Void
+}
+
+@MainActor
+final class NotchPresentationModel: ObservableObject {
+    @Published var presentation: NotchPresentation?
+}
+
 // MARK: - NotchPresenter
 
 /// Bridges EventQueue callbacks to DynamicNotchKit.
 ///
-/// `NotchPresenter` owns a single `DynamicNotch` instance at a time.
+/// `NotchPresenter` owns one reusable `DynamicNotch` instance for its lifetime.
 /// It uses DynamicNotchKit's compact/expanded states to show `CompactNotchView`
 /// and `ExpandedNotchView` respectively. Timing is owned entirely by `EventQueue`
 /// (for full-dismiss policies) and `NotchContent` (for collapse-to-compact) —
@@ -15,8 +49,19 @@ import DynamicNotchKit
 final class NotchPresenter {
     // DynamicNotch is typed to the concrete view types we pass in.
     // We use AnyView to keep the presenter's type simple.
-    private var notch: DynamicNotch<AnyView, EmptyView, EmptyView>?
+    private let presentationModel: NotchPresentationModel
+    private let makeNotch: @MainActor (NotchPresentationModel) -> DynamicNotchControlling
+    private var notch: DynamicNotchControlling?
     private var showTask: Task<Void, Never>?
+    private var hideTask: Task<Void, Never>?
+
+    init(
+        presentationModel: NotchPresentationModel? = nil,
+        makeNotch: @escaping @MainActor (NotchPresentationModel) -> DynamicNotchControlling = NotchPresenter.makeDefaultNotch
+    ) {
+        self.presentationModel = presentationModel ?? NotchPresentationModel()
+        self.makeNotch = makeNotch
+    }
 
     /// Shows a notification in the notch.
     ///
@@ -43,9 +88,13 @@ final class NotchPresenter {
         defaultExpansion: DefaultExpansionMode = .defaultValue,
         onClose: @escaping () -> Void
     ) {
-        // Cancel any in-flight show task and tear down the previous notch.
+        // Cancel any in-flight animation work before replacing the visible
+        // payload. The DynamicNotch instance itself is intentionally reused:
+        // DynamicNotchKit starts a screen-parameter observer task from each
+        // initializer, so per-event allocation can retain old notch instances
+        // for the app lifetime.
         showTask?.cancel()
-        notch = nil
+        let pendingHideTask = hideTask
 
         // `style: .auto`는 MacBook 내장 디스플레이처럼 safeAreaInsets.top이
         // 있는 화면에서만 `.notch`로 떨어지고, 외장 모니터에선 `.floating`
@@ -55,7 +104,7 @@ final class NotchPresenter {
         let targetScreen = screen ?? NSScreen.screens.first
         let isNotchStyle = (targetScreen?.safeAreaInsets.top ?? 0) > 0
 
-        let contentView = NotchContent(
+        presentationModel.presentation = NotchPresentation(
             event: event,
             pendingCount: pendingCount,
             theme: theme,
@@ -67,6 +116,38 @@ final class NotchPresenter {
             onClose: onClose
         )
 
+        let notchInstance = currentNotch()
+
+        showTask = Task {
+            await pendingHideTask?.value
+            guard !Task.isCancelled else { return }
+            if let screen {
+                await notchInstance.expand(on: screen)
+            } else {
+                await notchInstance.expand()
+            }
+        }
+    }
+
+    /// Hides the currently displayed notch.
+    func hide() {
+        showTask?.cancel()
+        showTask = nil
+        guard hideTask == nil else { return }
+        let captured = notch
+        let presentationID = presentationModel.presentation?.id
+        hideTask = Task { @MainActor [weak self] in
+            await captured?.hide()
+            guard !Task.isCancelled else { return }
+            defer { self?.hideTask = nil }
+            if let presentationID,
+               self?.presentationModel.presentation?.id == presentationID {
+                self?.presentationModel.presentation = nil
+            }
+        }
+    }
+
+    private static func makeDefaultNotch(model: NotchPresentationModel) -> DynamicNotchControlling {
         // Use the expanded-only convenience init so compact() falls through to hide().
         // We manage compact/expanded ourselves via NotchContent's @State.
         // NOTE: `.keepVisible`은 일부러 빼뒀다. DynamicNotchKit의 `_hide`는
@@ -75,11 +156,22 @@ final class NotchPresenter {
         // EventQueue가 전적으로 소유하므로 `.keepVisible`이 보호해줄 대상이
         // 없고, 오히려 × 버튼을 눌렀을 때 "호버 영역을 벗어나야만 닫히는"
         // 체감 버그를 만든다. hover 시각 피드백은 `.increaseShadow`로 충분.
-        let notchInstance = DynamicNotch<AnyView, EmptyView, EmptyView>(
+        DynamicNotch<AnyView, EmptyView, EmptyView>(
             hoverBehavior: [.increaseShadow],
             style: .auto,
-            expanded: { AnyView(contentView) }
+            expanded: { AnyView(NotchHostView(model: model)) }
         )
+    }
+
+    private func currentNotch() -> DynamicNotchControlling {
+        if let notch { return notch }
+        let notchInstance = makeNotch(presentationModel)
+        configureMotion(for: notchInstance)
+        notch = notchInstance
+        return notchInstance
+    }
+
+    private func configureMotion(for notchInstance: DynamicNotchControlling) {
         // Shape the motion to the "똑" of Tockk — a quick, punchy hit with
         // the faintest bounce, not a slow drop. Closing is sharper than the
         // library default so dismissal feels crisp, not dragged out.
@@ -94,40 +186,41 @@ final class NotchPresenter {
         //   스택 전환 때 오히려 박자가 분명해진다.
         // - conversion: compact↔expanded 폭 변화에 쓰이므로 damping을
         //   조금 더 풀어 확장 시 살짝 breath 있게.
-        notchInstance.transitionConfiguration.openingAnimation =
-            .spring(response: 0.38, dampingFraction: 0.78)
-        notchInstance.transitionConfiguration.closingAnimation =
-            .timingCurve(0.55, 0.0, 0.85, 0.45, duration: 0.18)
+        var configuration = notchInstance.transitionConfiguration
+        configuration.openingAnimation = .spring(response: 0.38, dampingFraction: 0.78)
+        configuration.closingAnimation = .timingCurve(0.55, 0.0, 0.85, 0.45, duration: 0.18)
         // conversion은 compact↔expanded에서 노치 바깥 container의 폭/높이를
         // 보간하는 곡선이다. 스프링을 쓰면 크기가 튕기면서 안쪽 fade와
         // 어긋나 전환이 "끊겨" 보였다. easeInOut으로 단일 호흡을 유지.
-        notchInstance.transitionConfiguration.conversionAnimation =
-            .easeInOut(duration: 0.34)
-        self.notch = notchInstance
-
-        showTask = Task { [weak self] in
-            guard !Task.isCancelled else { return }
-            if let screen {
-                await self?.notch?.expand(on: screen)
-            } else {
-                await self?.notch?.expand()
-            }
-        }
-    }
-
-    /// Hides the currently displayed notch.
-    func hide() {
-        showTask?.cancel()
-        showTask = nil
-        let captured = notch
-        notch = nil
-        Task {
-            await captured?.hide()
-        }
+        configuration.conversionAnimation = .easeInOut(duration: 0.34)
+        notchInstance.transitionConfiguration = configuration
     }
 }
 
 // MARK: - NotchContent
+
+private struct NotchHostView: View {
+    @ObservedObject var model: NotchPresentationModel
+
+    var body: some View {
+        if let presentation = model.presentation {
+            NotchContent(
+                event: presentation.event,
+                pendingCount: presentation.pendingCount,
+                theme: presentation.theme,
+                residence: presentation.residence,
+                residenceSeconds: presentation.residenceSeconds,
+                reduceMotion: presentation.reduceMotion,
+                defaultExpansion: presentation.defaultExpansion,
+                isNotchStyle: presentation.isNotchStyle,
+                onClose: presentation.onClose
+            )
+            .id(presentation.id)
+        } else {
+            EmptyView()
+        }
+    }
+}
 
 /// Internal SwiftUI view rendered inside the expanded notch.
 /// Manages the compact ↔ expanded toggle without leaking state into `NotchPresenter`.
