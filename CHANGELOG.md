@@ -2,6 +2,19 @@
 
 All notable changes to Tockk are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.1.2] - 2026-05-14
+
+### Fixed
+- Stabilized long-run notch presentation by reusing a single `DynamicNotch` instance across notification events.
+- Serialized rapid show-after-hide transitions to avoid leaked `hide()` continuations in DynamicNotchKit.
+
+### Added
+- Long-run measurement tooling for synthetic Tockk socket events, `vmmap`, and `leaks` samples.
+- Regression coverage for notch presenter reuse and in-flight hide sequencing.
+
+### Changed
+- Updated CI to use a newer macOS/Xcode runner and Node 24-ready checkout action.
+
 ## [0.1.1] - 2026-04-22
 
 ### Added
